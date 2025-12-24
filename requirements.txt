@@ -1,4 +1,4 @@
-ale_py==0.10.1
+ale_py==0.11.2
 autorom[accept-rom-license]==0.6.1
 av
 chex
