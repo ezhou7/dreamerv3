@@ -155,6 +155,9 @@ size400m: &size400m
 minecraft:
   task: minecraft_diamond
 
+liftoff:
+  task: liftoff_liftoff
+
 dmlab:
   task: dmlab_explore_goal_locations_small
   run: {steps: 2.6e7, train_ratio: 32}
