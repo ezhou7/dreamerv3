@@ -1,21 +1,34 @@
 import gymnasium as gym
 from gymnasium import spaces
+from gymnasium.envs.registration import register
 import numpy as np
-import pyautogui
+import vgamepad as vg
 import mss
 import cv2
 import time
 from PIL import Image
 
 
-class DroneSimulator(gym.Env):
-    metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 30}
+class DroneSimulatorEnv(gym.Env):
+    metadata = {
+        'render_modes': ['human', 'rgb_array'],
+        'render_fps': 240
+    }
 
     def __init__(self, render_mode=None, screen_region=None, action_meanings=None):
         super().__init__()
-        # Example action space: 0=do nothing, 1=left, 2=right, 3=jump
-        self.action_space = spaces.Discrete(4)
-        # Observation: 84x84x3 RGB pixels (Atari-style, grayscale optional)
+        # Continuous action space for:
+        # throttle (cannot go below 0),
+        # yaw (left=-1, right=1),
+        # pitch (left=-1, right=1),
+        # roll (left=-1, right=1)
+        self.action_space = spaces.Box(
+            low=np.array([0.0, -1.0, -1.0, -1.0]),
+            high=np.array([1.0, 1.0, 1.0, 1.0]),
+            shape=(4,),
+            dtype=np.float32
+        )
+        # Observation: 84x84x3 RGB pixels (placeholder; add UDP telemetry later)
         self.observation_space = spaces.Box(low=0, high=255, shape=(84, 84, 3), dtype=np.uint8)
 
         self.render_mode = render_mode
@@ -23,42 +36,52 @@ class DroneSimulator(gym.Env):
         self.screen_region = screen_region or {'top': 100, 'left': 100, 'width': 800, 'height': 600}
         self.sct = mss.mss()  # Screenshot tool
 
-        # Action mappings (adjust keys for your game)
-        self.action_meanings = action_meanings or ['NOOP', 'LEFT', 'RIGHT', 'JUMP']
-        self.action_keys = {0: None, 1: 'a', 2: 'd', 3: 'space'}
+        self.gamepad = vg.VX360Gamepad()
 
         self.current_obs = None
         self.prev_hash = None  # For simple progress reward
+        self._elapsed_steps = 0
 
     def _get_obs(self):
         # Capture screen
         screenshot = self.sct.grab(self.screen_region)
         img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
         img = img.resize((84, 84))  # Downscale
-        img = np.array(img)  # Shape: (84, 84, 3)
-        return img
+        return np.array(img)  # Shape: (84, 84, 3)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        # Restart game: Simulate ESC -> New Game (game-specific; automate menu navigation)
-        pyautogui.press('esc')  # Example: Open menu
-        time.sleep(0.5)
-        pyautogui.press('n')  # Example: 'N' for new game
-        time.sleep(2)  # Wait for load
+        self._elapsed_steps = 0
         self.prev_hash = None
+
+        self.gamepad.left_joystick(x_value=0, y_value=0)
+        self.gamepad.right_joystick(x_value=0, y_value=0)
+        self.gamepad.right_trigger(value=0)
+        self.gamepad.update()
+
+        # Replace pyautogui with ydotool
+        subprocess.run(['ydotool', 'key', 'KEY_ESC'])
+        time.sleep(0.5)
+        subprocess.run(['ydotool', 'key', 'KEY_N'])
+        time.sleep(2)
+
         obs = self._get_obs()
         self.current_obs = obs
-        return obs, {}
+        return obs, {}   
 
     def step(self, action):
-        # Execute action
-        key = self.action_keys[action]
-        if key:
-            pyautogui.keyDown(key)
-            time.sleep(0.05)  # Hold briefly
-            pyautogui.keyUp(key)
+        throttle = int(action[0] * 32767)
+        yaw = int(action[1] * 32767)
+        pitch = int(action[2] * 32767)
+        roll = int(action[3] * 32767)
 
-        time.sleep( 1 /30)  # ~30 FPS step
+        self.gamepad.left_joystick(x_value=roll, y_value=pitch)
+        self.gamepad.right_joystick(x_value=yaw, y_value=0)
+        self.gamepad.right_trigger(value=throttle // 128)
+
+        self.gamepad.update()
+
+        time.sleep(1 / 30)  # ~30 FPS step
 
         obs = self._get_obs()
         reward = 0
@@ -92,3 +115,7 @@ class DroneSimulator(gym.Env):
 
     def close(self):
         cv2.destroyAllWindows()
+
+
+register(id="Liftoff-v0", entry_point=DroneSimulatorEnv, max_episode_steps=300)
+
