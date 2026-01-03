@@ -5,8 +5,15 @@ import numpy as np
 import vgamepad as vg
 import mss
 import cv2
+import subprocess
 import time
 from PIL import Image
+
+from steam import (
+    LIFTOFF_GAME_SINGLE_PLAYER_BUTTON_POS,
+    LIFTOFF_GAME_QUICK_PLAY_BUTTON_POS,
+    LIFTOFF_GAME_QUICK_PLAY_RANDOM_BUTTON_POS
+)
 
 
 class DroneSimulatorEnv(gym.Env):
@@ -28,8 +35,8 @@ class DroneSimulatorEnv(gym.Env):
             shape=(4,),
             dtype=np.float32
         )
-        # Observation: 84x84x3 RGB pixels (placeholder; add UDP telemetry later)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(84, 84, 3), dtype=np.uint8)
+        # Observation: 64x64x3 RGB pixels (placeholder; add UDP telemetry later)
+        self.observation_space = spaces.Box(low=0, high=255, shape=(64, 64, 3), dtype=np.uint8)
 
         self.render_mode = render_mode
         # Define screen region to capture (x, y, width, height) - adjust via trial/error
@@ -42,12 +49,59 @@ class DroneSimulatorEnv(gym.Env):
         self.prev_hash = None  # For simple progress reward
         self._elapsed_steps = 0
 
+        self.__ydotoold()
+        self.__start_game()
+
+    def __ydotoold(self):
+        """
+        Start ydotool daemon service for ydotool subprocess commands if it hasn't started.
+        """
+        subprocess.run(['systemctl', '--user', 'start', 'ydotoold'])
+
+    def __start_game(self):
+        time.sleep(5)
+        buttons = [
+            LIFTOFF_GAME_SINGLE_PLAYER_BUTTON_POS,
+            LIFTOFF_GAME_QUICK_PLAY_BUTTON_POS,
+            LIFTOFF_GAME_QUICK_PLAY_RANDOM_BUTTON_POS
+        ]
+        for x, y, w, h in buttons:
+            cx, cy = x + w // 2, y + h // 2
+            subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
+            time.sleep(0.5)
+            subprocess.run(['ydotool', 'click', '0xC0'])
+            time.sleep(1)
+
+    def __quit_game():
+        subprocess.run(['ydotool', 'key', 'KEY_ESC'])
+        time.sleep(1)
+        buttons = [
+            LIFTOFF_GAME_QUIT_TO_MAIN_MENU_BUTTON_POS,
+            LIFTOFF_GAME_QUIT_TO_MAIN_MENU_CONFIRM_BUTTON_POS
+        ]
+        for x, y, w, h in buttons:
+            cx, cy = x + w // 2, y + h // 2
+            subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
+            time.sleep(0.5)
+            # left click
+            subprocess.run(['yodotool', 'click', '0xC0'])
+            time.sleep(1)
+
     def _get_obs(self):
         # Capture screen
-        screenshot = self.sct.grab(self.screen_region)
-        img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
-        img = img.resize((84, 84))  # Downscale
-        return np.array(img)  # Shape: (84, 84, 3)
+        # screenshot = self.sct.grab(self.screen_region)
+        # img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
+        # img = img.resize((64, 64))  # Downscale
+        # return np.array(img)  # Shape: (64, 64, 3)
+
+        result = subprocess.run(['grim', '-t', 'ppm', '-'], stdout=subprocess.PIPE)
+        # Decode the raw PPM image into a NumPy array for OpenCV
+        image = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
+        # print(image.shape)
+        image = cv2.resize(image, (64, 64))
+        cv2.show("downsampled image", image)
+        # print(image.shape)
+        return image
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -59,15 +113,12 @@ class DroneSimulatorEnv(gym.Env):
         self.gamepad.right_trigger(value=0)
         self.gamepad.update()
 
-        # Replace pyautogui with ydotool
-        subprocess.run(['ydotool', 'key', 'KEY_ESC'])
-        time.sleep(0.5)
-        subprocess.run(['ydotool', 'key', 'KEY_N'])
+        subprocess.run(['ydotool', 'key', 'KEY_R'])
         time.sleep(2)
 
         obs = self._get_obs()
         self.current_obs = obs
-        return obs, {}   
+        return obs
 
     def step(self, action):
         throttle = int(action[0] * 32767)
@@ -114,6 +165,7 @@ class DroneSimulatorEnv(gym.Env):
         pass  # Handled in step for simplicity
 
     def close(self):
+        self.__quit_game()
         cv2.destroyAllWindows()
 
 
