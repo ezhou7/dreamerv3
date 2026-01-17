@@ -3,8 +3,8 @@ from gymnasium import spaces
 from gymnasium.envs.registration import register
 import numpy as np
 import vgamepad as vg
-import mss
 import cv2
+import socket
 import subprocess
 import time
 from PIL import Image
@@ -35,18 +35,24 @@ class DroneSimulatorEnv(gym.Env):
             shape=(4,),
             dtype=np.float32
         )
-        # Observation: 64x64x3 RGB pixels (placeholder; add UDP telemetry later)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(64, 64, 3), dtype=np.uint8)
+        # Observation Space: Image + Telemetry
+        self.observation_space = spaces.Dict({
+            "image": spaces.Box(low=0, high=255, shape=(64, 64, 3), dtype=np.uint8),
+            "telemetry": spaces.Box(low=-1, high=1, shape=(21,), dtype=np.float32)
+        })
+
+        # UDP Setup
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 9001))
+        self.sock.settimeout(0.5)
+        self.fmt = "<f fff fff ffff fff ffff Bffff" # Matches TelemetryConfiguration.json
 
         self.render_mode = render_mode
         # Define screen region to capture (x, y, width, height) - adjust via trial/error
         self.screen_region = screen_region or {'top': 100, 'left': 100, 'width': 800, 'height': 600}
-        self.sct = mss.mss()  # Screenshot tool
 
         self.gamepad = vg.VX360Gamepad()
 
-        self.current_obs = None
-        self.prev_hash = None  # For simple progress reward
         self._elapsed_steps = 0
 
         self.__ydotoold()
@@ -88,25 +94,27 @@ class DroneSimulatorEnv(gym.Env):
             time.sleep(1)
 
     def _get_obs(self):
-        # Capture screen
-        # screenshot = self.sct.grab(self.screen_region)
-        # img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
-        # img = img.resize((64, 64))  # Downscale
-        # return np.array(img)  # Shape: (64, 64, 3)
+        # Capture Telemetry
+        try:
+            data, _ = self.sock.recvfrom(1024)
+            unpacked = struct.unpack(self.fmt, data[:struct.calcsize(self.fmt)])
+            # Flattened vector: Pos(3), Vel(3), Att(4), Gyro(3), Inputs(4), Motors(1 byte ignored + 4)
+            # We skip index 18 (motor count)
+            tel = np.array(unpacked[1:18] + unpacked[19:23], dtype=np.float32)
+        except:
+            tel = np.zeros(21, dtype=np.float32) # Fallback if packet missed
 
+        # Capture screen
         result = subprocess.run(['grim', '-t', 'ppm', '-'], stdout=subprocess.PIPE)
         # Decode the raw PPM image into a NumPy array for OpenCV
         image = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
-        # print(image.shape)
         image = cv2.resize(image, (64, 64))
-        cv2.show("downsampled image", image)
-        # print(image.shape)
-        return image
+
+        return {"image": image, "telemetry": tel}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._elapsed_steps = 0
-        self.prev_hash = None
 
         self.gamepad.left_joystick(x_value=0, y_value=0)
         self.gamepad.right_joystick(x_value=0, y_value=0)
@@ -140,24 +148,23 @@ class DroneSimulatorEnv(gym.Env):
         truncated = False
         info = {}
 
-        # Simple reward: Detect horizontal progress (improve with CV: detect player x-pos or score)
-        current_hash = hash(obs.tobytes())
-        if self.prev_hash is not None:
-            reward = 1 if current_hash != self.prev_hash else -0.01  # Sparse progress
-        self.prev_hash = current_hash
+        # 3. Logic for Terminated (Crash) and Truncated (Time)
+        # Simple crash detection: Velocity becomes 0 while throttle is high, or height < threshold
+        velocity_mag = np.linalg.norm(obs["telemetry"][3:6])
+        altitude = obs["telemetry"][1] # Adjust based on your Y/Z axis config
 
-        # Termination: Detect game over (e.g., via pixel check for "DEATH" screen)
-        if np.mean(obs[:, :, 0]) > 200:  # Dummy: Red screen = death
-            terminated = True
-
-        # Truncation: Max steps (e.g., 1000)
+        terminated = bool(velocity_mag < 0.1 and action[0] > 0.5) # Example crash heuristic
         if self._elapsed_steps >= 1000:  # Track self._elapsed_steps in full impl
             truncated = True
 
+        # 4. Reward Logic
+        reward = velocity_mag * 0.1 # Reward for moving fast
+        if terminated: reward = -10.0
+
         self.current_obs = obs
-        if self.render_mode == 'human':
-            cv2.imshow('Game', cv2.cvtColor(obs, cv2.COLOR_RGB2BGR))
-            cv2.waitKey(1)
+        # if self.render_mode == 'human':
+        #     cv2.imshow('Game', cv2.cvtColor(obs, cv2.COLOR_RGB2BGR))
+        #     cv2.waitKey(1)
 
         return obs, reward, terminated, truncated, info
 

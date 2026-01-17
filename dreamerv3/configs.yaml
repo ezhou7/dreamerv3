@@ -157,6 +157,7 @@ minecraft:
 
 liftoff:
   task: liftoff_liftoff
+  run: {envs: 1, train_ratio: 32}
 
 dmlab:
   task: dmlab_explore_goal_locations_small

@@ -1,0 +1,13 @@
+{
+  "EndPoint": "127.0.0.1:9001",
+  "StreamFormat": [
+    "Timestamp",
+    "PositionX", "PositionY", "PositionZ",
+    "SpeedX", "SpeedY", "SpeedZ",
+    "AttitudeX", "AttitudeY", "AttitudeZ", "AttitudeW",
+    "GyroPitch", "GyroRoll", "GyroYaw",
+    "InputThrottle", "InputYaw", "InputPitch", "InputRoll",
+    "MotorRPM"
+  ]
+}
+
