@@ -126,7 +126,8 @@ class Agent(embodied.jax.Agent):
     act = sample(policy)
     out = {}
     out['finite'] = elements.tree.flatdict(jax.tree.map(
-        lambda x: jnp.isfinite(x).all(range(1, x.ndim)),
+        lambda x: jnp.sum(jnp.logical_not(jnp.isfinite(x)).astype(jnp.float32), axis=tuple(range(1, x.ndim))) == 0.0,
+
         dict(obs=obs, carry=carry, tokens=tokens, feat=feat, act=act)))
     carry = (enc_carry, dyn_carry, dec_carry, act)
     if self.config.replay_context:

@@ -70,8 +70,8 @@ defaults:
     debug: True
 
   jax:
-    platform: cuda
-    compute_dtype: bfloat16
+    platform: ''
+    compute_dtype: float32
     policy_devices: [0]
     train_devices: [0]
     mock_devices: 0

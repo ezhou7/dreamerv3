@@ -52,7 +52,7 @@ def init(name):
 def dropout(x, prob, training):
   if not prob or not training:
     return x
-  keep = jax.random.bernoulli(nj.seed(), 1.0 - prob, x.shape)
+  keep = jax.random.bernoulli(nj.seed(), 1.0 - prob, x.shape).astype(x.dtype)
   return x * keep / (1.0 - prob)
 
 
@@ -93,9 +93,11 @@ def available(*trees, bdims=None):
       else:
         raise NotImplementedError(x.dtype)
       if bdims is not None:
-        mask = mask.all(tuple(range(bdims, mask.ndim)))
+        # mask = mask.all(tuple(range(bdims, mask.ndim)))
+        mask = (mask.astype(jnp.float32).mean(tuple(range(bdims, mask.ndim))) == 1.0)
       masks.append(mask)
-    return jnp.stack(masks, 0).all(0)
+    # return jnp.stack(masks, 0).all(0)
+    return (jnp.stack(masks, 0).astype(jnp.float32).mean(0) == 1.0)
   return jax.tree.map(fn, *trees)
 
 

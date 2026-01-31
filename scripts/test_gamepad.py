@@ -1,6 +1,15 @@
-import vgamepad as vg
+try:
+    import vgamepad as vg
+except ImportError:
+    vg = None
 import keyboard
 import time
+import sys
+
+if vg is None:
+    print("Error: vgamepad module not found.")
+    print("This script requires vgamepad, which is not available on macOS.")
+    sys.exit(1)
 
 gamepad = vg.VX360Gamepad()
 

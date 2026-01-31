@@ -2,12 +2,21 @@ import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.envs.registration import register
 import numpy as np
-import vgamepad as vg
+try:
+    import vgamepad as vg
+except ImportError:
+    vg = None
 import cv2
 import socket
 import subprocess
 import time
+import sys
+import platform
 from PIL import Image
+import mss
+from pynput.keyboard import Key, Controller as KeyboardController
+from pynput.mouse import Button, Controller as MouseController
+import struct
 
 from steam import (
     LIFTOFF_GAME_SINGLE_PLAYER_BUTTON_POS,
@@ -51,11 +60,22 @@ class DroneSimulatorEnv(gym.Env):
         # Define screen region to capture (x, y, width, height) - adjust via trial/error
         self.screen_region = screen_region or {'top': 100, 'left': 100, 'width': 800, 'height': 600}
 
-        self.gamepad = vg.VX360Gamepad()
+        if vg:
+            self.gamepad = vg.VX360Gamepad()
+            self.use_gamepad = True
+        else:
+            self.gamepad = None
+            self.use_gamepad = False
+            self.keyboard = KeyboardController()
+            print("vgamepad not found. Using keyboard emulation.")
+
+        self.mouse = MouseController()
+        self.sct = mss.mss()
 
         self._elapsed_steps = 0
 
-        self.__ydotoold()
+        if platform.system() == "Linux":
+            self.__ydotoold()
         self.__start_game()
 
     def __ydotoold(self):
@@ -71,15 +91,31 @@ class DroneSimulatorEnv(gym.Env):
             LIFTOFF_GAME_QUICK_PLAY_BUTTON_POS,
             LIFTOFF_GAME_QUICK_PLAY_RANDOM_BUTTON_POS
         ]
+        
+        # Get screen offset if needed (optional, assuming button coords are absolute or relative to primary)
+        # For now, we assume coordinates are correct for the primary display
+        
         for x, y, w, h in buttons:
             cx, cy = x + w // 2, y + h // 2
-            subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
-            time.sleep(0.5)
-            subprocess.run(['ydotool', 'click', '0xC0'])
+            
+            if platform.system() == "Linux":
+                subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
+                time.sleep(0.5)
+                subprocess.run(['ydotool', 'click', '0xC0'])
+            else:
+                self.mouse.position = (cx, cy)
+                time.sleep(0.5)
+                self.mouse.click(Button.left)
+                
             time.sleep(1)
 
-    def __quit_game():
-        subprocess.run(['ydotool', 'key', 'KEY_ESC'])
+    def __quit_game(self):
+        if platform.system() == "Linux":
+            subprocess.run(['ydotool', 'key', 'KEY_ESC'])
+        else:
+            self.keyboard.press(Key.esc)
+            self.keyboard.release(Key.esc)
+            
         time.sleep(1)
         buttons = [
             LIFTOFF_GAME_QUIT_TO_MAIN_MENU_BUTTON_POS,
@@ -87,10 +123,16 @@ class DroneSimulatorEnv(gym.Env):
         ]
         for x, y, w, h in buttons:
             cx, cy = x + w // 2, y + h // 2
-            subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
-            time.sleep(0.5)
-            # left click
-            subprocess.run(['yodotool', 'click', '0xC0'])
+            
+            if platform.system() == "Linux":
+                subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
+                time.sleep(0.5)
+                subprocess.run(['ydotool', 'click', '0xC0'])
+            else:
+                self.mouse.position = (cx, cy)
+                time.sleep(0.5)
+                self.mouse.click(Button.left)
+                
             time.sleep(1)
 
     def _get_obs(self):
@@ -104,10 +146,15 @@ class DroneSimulatorEnv(gym.Env):
         except:
             tel = np.zeros(21, dtype=np.float32) # Fallback if packet missed
 
-        # Capture screen
-        result = subprocess.run(['grim', '-t', 'ppm', '-'], stdout=subprocess.PIPE)
-        # Decode the raw PPM image into a NumPy array for OpenCV
-        image = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
+        # Capture screen using mss
+        sct_img = self.sct.grab(self.screen_region)
+        image = np.array(sct_img)
+        # mss returns BGRA, convert to RGB (opencv uses BGR usually, but we want consistent format)
+        # Actually cv2.imdecode in original code produced BGR. 
+        # mss produces BGRA. Let's keep it BGR for consistency if we were using cv2.imread
+        # But here we are converting to a gym observation which is usually RGB.
+        # However, the original code used cv2.imdecode(..., cv2.IMREAD_COLOR) which is BGR.
+        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
         image = cv2.resize(image, (64, 64))
 
         return {"image": image, "telemetry": tel}
@@ -116,12 +163,25 @@ class DroneSimulatorEnv(gym.Env):
         super().reset(seed=seed)
         self._elapsed_steps = 0
 
-        self.gamepad.left_joystick(x_value=0, y_value=0)
-        self.gamepad.right_joystick(x_value=0, y_value=0)
-        self.gamepad.right_trigger(value=0)
-        self.gamepad.update()
+        if self.use_gamepad:
+            self.gamepad.left_joystick(x_value=0, y_value=0)
+            self.gamepad.right_joystick(x_value=0, y_value=0)
+            self.gamepad.right_trigger(value=0)
+            self.gamepad.update()
+        else:
+            # Release all keys
+            for key in [Key.up, Key.down, Key.left, Key.right, 'w', 's', 'a', 'd']:
+                try:
+                    self.keyboard.release(key)
+                except:
+                    pass
 
-        subprocess.run(['ydotool', 'key', 'KEY_R'])
+        if platform.system() == "Linux":
+            subprocess.run(['ydotool', 'key', 'KEY_R'])
+        else:
+            self.keyboard.press('r')
+            self.keyboard.release('r')
+            
         time.sleep(2)
 
         obs = self._get_obs()
@@ -134,11 +194,51 @@ class DroneSimulatorEnv(gym.Env):
         pitch = int(action[2] * 32767)
         roll = int(action[3] * 32767)
 
-        self.gamepad.left_joystick(x_value=roll, y_value=pitch)
-        self.gamepad.right_joystick(x_value=yaw, y_value=0)
-        self.gamepad.right_trigger(value=throttle // 128)
+        if self.use_gamepad:
+            self.gamepad.left_joystick(x_value=roll, y_value=pitch)
+            self.gamepad.right_joystick(x_value=yaw, y_value=0)
+            self.gamepad.right_trigger(value=throttle // 128)
+            self.gamepad.update()
+        else:
+            # Keyboard emulation fallback
+            # Throttle: 'w' for up (if action[0] > 0.5)
+            if action[0] > 0.5:
+                self.keyboard.press('w')
+            else:
+                self.keyboard.release('w')
+            
+            # Yaw: 'a'/-1, 'd'/1
+            if action[1] < -0.2:
+                self.keyboard.press('a')
+                self.keyboard.release('d')
+            elif action[1] > 0.2:
+                self.keyboard.press('d')
+                self.keyboard.release('a')
+            else:
+                self.keyboard.release('a')
+                self.keyboard.release('d')
 
-        self.gamepad.update()
+            # Pitch: Up/Down arrows
+            if action[2] < -0.2:
+                self.keyboard.press(Key.down) # Pull back to pitch up? Or standard? Usually Down Arrow is pitch up (stick back)
+                self.keyboard.release(Key.up)
+            elif action[2] > 0.2:
+                self.keyboard.press(Key.up)
+                self.keyboard.release(Key.down)
+            else:
+                self.keyboard.release(Key.up)
+                self.keyboard.release(Key.down)
+
+            # Roll: Left/Right arrows
+            if action[3] < -0.2:
+                self.keyboard.press(Key.left)
+                self.keyboard.release(Key.right)
+            elif action[3] > 0.2:
+                self.keyboard.press(Key.right)
+                self.keyboard.release(Key.left)
+            else:
+                self.keyboard.release(Key.left)
+                self.keyboard.release(Key.right)
 
         time.sleep(1 / 30)  # ~30 FPS step
 
