@@ -216,7 +216,7 @@ def make_env(config, index, **overrides):
     import memory_maze  # noqa
   if suite == 'liftoff':
     from embodied.envs import from_gym
-    import steam.drone_simulator
+    import steam.drone_simulator_hover
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
@@ -235,7 +235,7 @@ def make_env(config, index, **overrides):
       'memmaze': lambda task, **kw: from_gym.FromGym(
           f'MemoryMaze-{task}-v0', **kw),
       'liftoff': lambda task, **kw: from_gym.FromGym(
-          'Liftoff-v0', **kw),
+          'Liftoff-hover-v0', **kw),
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
