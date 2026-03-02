@@ -216,7 +216,7 @@ def make_env(config, index, **overrides):
     import memory_maze  # noqa
   if suite == 'liftoff':
     from embodied.envs import from_gym
-    import steam.drone_simulator_hover
+    import steam.liftoff.hover_env
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
