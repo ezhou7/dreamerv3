@@ -58,6 +58,8 @@ class FromGym(embodied.Env):
     if action['reset'] or self._done:
       self._done = False
       obs = self._env.reset()
+      if isinstance(obs, tuple):
+        obs = obs[0]
       return self._obs(obs, 0.0, is_first=True)
     if self._act_dict:
       action = self._unflatten(action)
