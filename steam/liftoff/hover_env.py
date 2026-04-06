@@ -52,10 +52,16 @@ class LiftoffHoverEnv(gym.Env):
         self.__start_game()
 
         self.min_x, self.max_x, self.min_y, self.max_y, self.min_z, self.max_z = self.__define_boundaries()
+        self.target_x = (self.min_x + self.max_x) / 2.0
+        self.target_y = (self.min_y + self.max_y) / 2.0
+        self.target_z = (self.min_z + self.max_z) / 2.0
         print("Boundaries")
         print(self.min_x, self.max_x, self.min_y, self.max_y, self.min_z, self.max_z)
+        print("Target hover position:", self.target_x, self.target_y, self.target_z)
         self.current_obs = None
         self.out_of_bounds_window = deque()
+        self._smoothed_action = np.zeros(4, dtype=np.float32)
+        self._action_alpha = 0.3  # EMA factor: 0 = fully smooth, 1 = no smoothing
 
     def __ydotoold(self):
         """
@@ -95,9 +101,9 @@ class LiftoffHoverEnv(gym.Env):
     def __define_boundaries(self):
         """Define boundaries for drone."""
         tel = self.liftoff_telemetry.capture_telemetry()
-        min_x, max_x = tel[0] - 5, tel[0] + 5
-        min_y, max_y = tel[1], tel[1] + 10
-        min_z, max_z = tel[2] - 5, tel[2] + 5
+        min_x, max_x = tel[0] - 10, tel[0] + 10
+        min_y, max_y = tel[1] - 1, tel[1] + 15
+        min_z, max_z = tel[2] - 10, tel[2] + 10
 
         return min_x, max_x, min_y, max_y, min_z, max_z
 
@@ -126,65 +132,100 @@ class LiftoffHoverEnv(gym.Env):
 
         self.gamepad.left_joystick(x_value=0, y_value=0)
         self.gamepad.right_joystick(x_value=0, y_value=0)
-        self.gamepad.right_trigger(value=0)
         self.gamepad.update()
 
         # press R key to reset game
         subprocess.run(['ydotool', 'key', '19:1', "19:0"])
         time.sleep(2)
 
-        # press 1 key to arm drone (1 key is custom mapped to arm in game)
-        subprocess.run(['ydotool', 'key', '2:1', '2:0'])
+        # Arm drone: hold throttle all the way down for 1 second
+        self.gamepad.left_joystick(x_value=0, y_value=-32768)
+        self.gamepad.update()
+        time.sleep(1)
+        self.gamepad.left_joystick(x_value=0, y_value=0)
+        self.gamepad.update()
         time.sleep(3)
 
+        # Recalculate boundaries from current drone position
+        self.min_x, self.max_x, self.min_y, self.max_y, self.min_z, self.max_z = self.__define_boundaries()
+        self.target_x = (self.min_x + self.max_x) / 2.0
+        self.target_y = (self.min_y + self.max_y) / 2.0
+        self.target_z = (self.min_z + self.max_z) / 2.0
+
         obs = self._get_obs()
+        tel = obs["telemetry"]
+        x, y, z = tel[0], tel[1], tel[2]
+        print(f"Bounding box: X[{self.min_x:.2f}, {self.max_x:.2f}] Y[{self.min_y:.2f}, {self.max_y:.2f}] Z[{self.min_z:.2f}, {self.max_z:.2f}]")
+        print(f"Drone position: X={x:.2f} Y={y:.2f} Z={z:.2f}")
+        print(f"Relative to box: X={((x - self.min_x) / (self.max_x - self.min_x)):.2%} Y={((y - self.min_y) / (self.max_y - self.min_y)):.2%} Z={((z - self.min_z) / (self.max_z - self.min_z)):.2%}")
         self.current_obs = obs
+        self._smoothed_action = np.zeros(4, dtype=np.float32)
         return obs, {}
 
     def step(self, action):
-        # right_trigger expects 0-255 (unsigned byte); clamp throttle to [0, 1]
-        throttle = int(np.clip(action[0], 0.0, 1.0) * 255)
-        yaw = int(action[1] * 32767)
-        pitch = int(action[2] * 32767)
-        roll = int(action[3] * 32767)
+        # Smooth actions with exponential moving average
+        action = np.asarray(action, dtype=np.float32)
+        self._smoothed_action = self._action_alpha * action + (1 - self._action_alpha) * self._smoothed_action
 
-        print("Action: ", throttle, yaw, pitch, roll)
+        # Mode 2: Left stick = throttle (Y) + yaw (X), Right stick = pitch (Y) + roll (X)
+        throttle = int(np.clip(self._smoothed_action[0], -1.0, 1.0) * 32767)
+        yaw = int(np.clip(self._smoothed_action[1], -1.0, 1.0) * 32767)
+        pitch = int(np.clip(self._smoothed_action[2], -1.0, 1.0) * 32767)
+        roll = int(np.clip(self._smoothed_action[3], -1.0, 1.0) * 32767)
 
-        self.gamepad.left_joystick(x_value=roll, y_value=pitch)
-        self.gamepad.right_joystick(x_value=yaw, y_value=0)
-        self.gamepad.right_trigger(value=throttle)
+        # print("Action: ", throttle, yaw, pitch, roll)
+
+        self.gamepad.left_joystick(x_value=yaw, y_value=throttle)
+        self.gamepad.right_joystick(x_value=roll, y_value=pitch)
 
         self.gamepad.update()
 
         self._elapsed_steps += 1
 
         obs = self._get_obs()
-        terminated = False
-        truncated = False
-        info = {}
+        tel = obs["telemetry"]
 
-        altitude = obs["telemetry"][1]  # Y axis = altitude
+        x, altitude, z = tel[0], tel[1], tel[2]
+        speed = np.linalg.norm(tel[3:6])
+        qw = tel[9]  # quaternion W component
+        gyro_mag = np.linalg.norm(tel[10:13])
 
-        self.out_of_bounds_window.append(not self.__is_within_bounds(obs["telemetry"]))
+        # Reward: 4-component weighted sum, range [0, 1]
+        # 1. Altitude: Gaussian centered on target hover height
+        alt_err = altitude - self.target_y
+        r_altitude = np.exp(-0.5 * (alt_err / 2.0) ** 2)
+
+        # 2. Horizontal position: penalize XZ drift from start
+        horiz_dist = np.sqrt((x - self.target_x) ** 2 + (z - self.target_z) ** 2)
+        r_horizontal = np.exp(-0.5 * (horiz_dist / 2.0) ** 2)
+
+        # 3. Stability: low velocity + low gyro rates
+        r_stability = 0.5 * np.exp(-0.5 * speed ** 2) + 0.5 * np.exp(-0.5 * gyro_mag ** 2)
+
+        # 4. Orientation: upright drone has qw close to +/-1
+        r_orientation = qw ** 2
+
+        reward = float(
+            0.40 * r_altitude
+            + 0.20 * r_horizontal
+            + 0.25 * r_stability
+            + 0.15 * r_orientation
+        )
+
+        # Termination: 10 consecutive out-of-bounds steps
+        self.out_of_bounds_window.append(not self.__is_within_bounds(tel))
         if len(self.out_of_bounds_window) > 10:
             self.out_of_bounds_window.popleft()
 
-        terminated = all(self.out_of_bounds_window)  # if drone is out of bounds
-        if self._elapsed_steps >= 1000:
-            truncated = True
+        terminated = len(self.out_of_bounds_window) == 10 and all(self.out_of_bounds_window)
+        truncated = self._elapsed_steps >= 300
 
-        # Reward: penalise altitude deviation from previous step; avoid div-by-zero
-        prev_altitude = self.current_obs["telemetry"][1] if self.current_obs else altitude
-        if prev_altitude != 0:
-            reward = 0.1 * (1 - abs(altitude - prev_altitude) / abs(prev_altitude))
-        else:
-            reward = 0.1
         if terminated:
-            reward = -10.0
+            reward = -1.0
 
         self.current_obs = obs
 
-        return obs, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, {}
 
     def render(self):
         pass  # Handled in step for simplicity
@@ -195,3 +236,4 @@ class LiftoffHoverEnv(gym.Env):
 
 
 register(id="Liftoff-hover-v0", entry_point=LiftoffHoverEnv, max_episode_steps=300)
+
