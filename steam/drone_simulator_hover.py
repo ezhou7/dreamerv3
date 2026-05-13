@@ -63,7 +63,7 @@ class DroneSimulatorHoverEnv(gym.Env):
         """
         Start ydotool daemon service for ydotool subprocess commands if it hasn't started.
         """
-        subprocess.run(['systemctl', '--user', 'start', 'ydotoold'])
+        subprocess.run(['systemctl', '--user', 'start', 'ydotool'])
 
     def __start_game(self):
         time.sleep(5)

@@ -3,7 +3,6 @@ import subprocess
 import time
 import gymnasium as gym
 import numpy as np
-import vgamepad as vg
 
 from collections import deque
 from gymnasium.spaces import Box, Dict
@@ -17,30 +16,24 @@ from steam import (
     LIFTOFF_GAME_QUIT_TO_MAIN_MENU_CONFIRM_BUTTON_POS
 )
 from steam.liftoff.telemetry import LiftoffTelemetry
+from steam.liftoff.transmitter import EvdevTransmitter
 
 
-class LiftoffHoverEnv(gym.Env):
+class LiftoffHoverEnvUInput(gym.Env):
     def __init__(self, render_mode=None, screen_region=None, action_meanings=None):
         super().__init__()
-        # Continuous action space for:
-        # throttle (-1, 1),
-        # yaw (left=-1,telemetry right=1),
-        # pitch (left=-1, right=1),
-        # roll (left=-1, right=1)
         self.action_space = Box(
             low=np.array([-1.0, -1.0, -1.0, -1.0]),
             high=np.array([1.0, 1.0, 1.0, 1.0]),
             shape=(4,),
             dtype=np.float32
         )
-        # Observation Space: Image + Telemetry
         self.observation_space = Dict({
             "image": Box(low=0, high=255, shape=(64, 64, 3), dtype=np.uint8),
             "telemetry": Box(low=-float("inf"), high=float("inf"), shape=(21,), dtype=np.float32)
         })
 
         self.render_mode = render_mode
-        # Define screen region to capture (x, y, width, height) - adjust via trial/error
         self.screen_region = screen_region or {'top': 100, 'left': 100, 'width': 800, 'height': 600}
 
         self._elapsed_steps = 0
@@ -48,14 +41,14 @@ class LiftoffHoverEnv(gym.Env):
         self.current_obs = None
         self.out_of_bounds_window = deque()
         self._smoothed_action = np.zeros(4, dtype=np.float32)
-        self._action_alpha = 0.3  # EMA factor: 0 = fully smooth, 1 = no smoothing
+        self._action_alpha = 0.3
 
     def _lazy_init(self):
         if self._initialized:
             return
         self._initialized = True
         self.liftoff_telemetry = LiftoffTelemetry()
-        self.gamepad = vg.VX360Gamepad()
+        self.transmitter = EvdevTransmitter()
         self.__ydotoold()
         self.__start_game()
         self.min_x, self.max_x, self.min_y, self.max_y, self.min_z, self.max_z = self.__define_boundaries()
@@ -67,9 +60,6 @@ class LiftoffHoverEnv(gym.Env):
         print("Target hover position:", self.target_x, self.target_y, self.target_z)
 
     def __ydotoold(self):
-        """
-        Start ydotool daemon service for ydotool subprocess commands if it hasn't started.
-        """
         subprocess.run(['systemctl', '--user', 'start', 'ydotool'])
 
     def __start_game(self):
@@ -97,17 +87,14 @@ class LiftoffHoverEnv(gym.Env):
             cx, cy = x + w // 2, y + h // 2
             subprocess.run(['hyprctl', 'dispatch', 'movecursor', f'{cx} {cy}'])
             time.sleep(0.5)
-            # left click
             subprocess.run(['ydotool', 'click', '0xC0'])
             time.sleep(1)
 
     def __define_boundaries(self):
-        """Define boundaries for drone."""
         tel = self.liftoff_telemetry.capture_telemetry()
         min_x, max_x = tel[0] - 10, tel[0] + 10
         min_y, max_y = tel[1] - 1, tel[1] + 15
         min_z, max_z = tel[2] - 10, tel[2] + 10
-
         return min_x, max_x, min_y, max_y, min_z, max_z
 
     def __is_within_bounds(self, tel: np.array):
@@ -119,9 +106,7 @@ class LiftoffHoverEnv(gym.Env):
     def _get_obs(self):
         tel = self.liftoff_telemetry.capture_telemetry()
 
-        # Capture screen
         result = subprocess.run(['grim', '-t', 'ppm', '-'], stdout=subprocess.PIPE)
-        # Decode the raw PPM image into a NumPy array for OpenCV
         image = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = cv2.resize(image, (64, 64))
@@ -134,24 +119,19 @@ class LiftoffHoverEnv(gym.Env):
         self._elapsed_steps = 0
         self.out_of_bounds_window.clear()
 
-        self.gamepad.left_joystick(x_value=0, y_value=0)
-        self.gamepad.right_joystick(x_value=0, y_value=0)
-        self.gamepad.update()
+        self.transmitter.center_all()
 
-        # press R key to reset game
         subprocess.run(['ydotool', 'key', '19:1', "19:0"])
         time.sleep(2)
 
         # Arm drone: hold throttle all the way down for 1 second
         print("Arming drone...")
-        self.gamepad.left_joystick(x_value=0, y_value=-32768)
-        self.gamepad.update()
+        self.transmitter.set_sticks(throttle=-32768)
+        self.transmitter.update()
         time.sleep(1)
-        self.gamepad.left_joystick(x_value=0, y_value=0)
-        self.gamepad.update()
+        self.transmitter.center_all()
         time.sleep(3)
 
-        # Recalculate boundaries from current drone position
         self.min_x, self.max_x, self.min_y, self.max_y, self.min_z, self.max_z = self.__define_boundaries()
         self.target_x = (self.min_x + self.max_x) / 2.0
         self.target_y = (self.min_y + self.max_y) / 2.0
@@ -168,11 +148,9 @@ class LiftoffHoverEnv(gym.Env):
         return obs, {}
 
     def step(self, action):
-        # Smooth actions with exponential moving average
         action = np.asarray(action, dtype=np.float32)
         self._smoothed_action = self._action_alpha * action + (1 - self._action_alpha) * self._smoothed_action
 
-        # Mode 2: Left stick = throttle (Y) + yaw (X), Right stick = pitch (Y) + roll (X)
         throttle = int(np.clip(self._smoothed_action[0], -1.0, 1.0) * 32767)
         yaw = int(np.clip(self._smoothed_action[1], -1.0, 1.0) * 32767)
         pitch = int(np.clip(self._smoothed_action[2], -1.0, 1.0) * 32767)
@@ -180,10 +158,8 @@ class LiftoffHoverEnv(gym.Env):
 
         print("Action: ", throttle, yaw, pitch, roll)
 
-        self.gamepad.left_joystick(x_value=yaw, y_value=throttle)
-        self.gamepad.right_joystick(x_value=roll, y_value=pitch)
-
-        self.gamepad.update()
+        self.transmitter.set_sticks(roll=roll, pitch=pitch, throttle=throttle, yaw=yaw)
+        self.transmitter.update()
 
         self._elapsed_steps += 1
 
@@ -192,22 +168,17 @@ class LiftoffHoverEnv(gym.Env):
 
         x, altitude, z = tel[0], tel[1], tel[2]
         speed = np.linalg.norm(tel[3:6])
-        qw = tel[9]  # quaternion W component
+        qw = tel[9]
         gyro_mag = np.linalg.norm(tel[10:13])
 
-        # Reward: 4-component weighted sum, range [0, 1]
-        # 1. Altitude: Gaussian centered on target hover height
         alt_err = altitude - self.target_y
         r_altitude = np.exp(-0.5 * (alt_err / 2.0) ** 2)
 
-        # 2. Horizontal position: penalize XZ drift from start
         horiz_dist = np.sqrt((x - self.target_x) ** 2 + (z - self.target_z) ** 2)
         r_horizontal = np.exp(-0.5 * (horiz_dist / 2.0) ** 2)
 
-        # 3. Stability: low velocity + low gyro rates
         r_stability = 0.5 * np.exp(-0.5 * speed ** 2) + 0.5 * np.exp(-0.5 * gyro_mag ** 2)
 
-        # 4. Orientation: upright drone has qw close to +/-1
         r_orientation = qw ** 2
 
         reward = float(
@@ -217,7 +188,6 @@ class LiftoffHoverEnv(gym.Env):
             + 0.15 * r_orientation
         )
 
-        # Termination: 10 consecutive out-of-bounds steps
         self.out_of_bounds_window.append(not self.__is_within_bounds(tel))
         if len(self.out_of_bounds_window) > 10:
             self.out_of_bounds_window.popleft()
@@ -233,13 +203,13 @@ class LiftoffHoverEnv(gym.Env):
         return obs, reward, terminated, truncated, {}
 
     def render(self):
-        pass  # Handled in step for simplicity
+        pass
 
     def close(self):
         if self._initialized:
             self.__quit_game()
+            self.transmitter.close()
         cv2.destroyAllWindows()
 
 
-register(id="Liftoff-hover-v0", entry_point=LiftoffHoverEnv, max_episode_steps=300)
-
+register(id="Liftoff-hover-uinput-v0", entry_point=LiftoffHoverEnvUInput, max_episode_steps=300)

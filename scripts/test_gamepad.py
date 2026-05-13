@@ -16,9 +16,20 @@ def lerp(current, target, speed):
     return current + (target - current) * speed
 
 print("--- Smooth Drone Controller ---")
-print("F1: Toggle | Q: Quit")
+print("F1: Toggle | F2: Center all axes | Q: Quit")
 
 keyboard.add_hotkey('f1', lambda: globals().update(is_active=not is_active) or print("Toggled"))
+
+def center_all():
+    current_pos[:] = [0.0, 0.0, 0.0, 0.0]
+    gamepad.left_joystick(0, 0)
+    gamepad.right_joystick(0, 0)
+    gamepad.left_trigger(0)
+    gamepad.right_trigger(0)
+    gamepad.update()
+    print("Centered all axes")
+
+keyboard.add_hotkey('f2', center_all)
 
 try:
     while True:
