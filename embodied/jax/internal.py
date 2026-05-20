@@ -30,7 +30,11 @@ def setup(
     num_processes=1,
     coordinator_address=None,
     compilation_cache=True,
+    cuda_visible_devices='',
 ):
+  if cuda_visible_devices:
+    os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(cuda_visible_devices)
   platform and jax.config.update('jax_platforms', platform)
   jax.config.update('jax_disable_most_optimizations', debug)
   jax.config.update('jax_disable_jit', not jit)
