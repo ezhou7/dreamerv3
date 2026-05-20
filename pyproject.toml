@@ -20,7 +20,7 @@ dependencies = [
     "mss>=10.2.0",
     "ninjax>=3.5.1",
     "numpy<2",
-    "nvidia-cuda-nvcc-cu12<=12.6.85",
+    "nvidia-cuda-nvcc-cu12>=12.8",
     "opencv-python>=4.11.0.86",
     "optax>=0.2.5",
     "portal>=3.5.0",
