@@ -19,11 +19,14 @@ RC_CHANNEL_AXES = [
 ]
 
 
-def _create_transmitter():
+def _create_transmitter(with_buttons=False):
     """Create a virtual RC transmitter via evdev UInput.
 
     Mimics a USB-connected FPV radio (e.g. FrSky, RadioMaster)
     presenting as a 6-channel joystick device.
+
+    If `with_buttons` is True, declares 8 BTN_JOYSTICK keys so SDL2/Unity
+    classify the device as a joystick rather than a generic input device.
     """
     # All channels use the same range as real RC transmitters
     channel_info = AbsInfo(value=0, min=-32768, max=32767, fuzz=0, flat=0, resolution=0)
@@ -31,6 +34,8 @@ def _create_transmitter():
     cap = {
         ecodes.EV_ABS: [(axis, channel_info) for axis in RC_CHANNEL_AXES],
     }
+    if with_buttons:
+        cap[ecodes.EV_KEY] = [ecodes.BTN_JOYSTICK + i for i in range(8)]
 
     device = UInput(
         cap,
@@ -46,8 +51,8 @@ def _create_transmitter():
 class EvdevTransmitter:
     """Virtual RC transmitter that sends stick inputs via evdev UInput."""
 
-    def __init__(self):
-        self.device = _create_transmitter()
+    def __init__(self, with_buttons=False):
+        self.device = _create_transmitter(with_buttons=with_buttons)
         self._pending = False
 
     def set_channel(self, channel_idx, value):

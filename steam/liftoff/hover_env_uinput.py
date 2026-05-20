@@ -212,4 +212,4 @@ class LiftoffHoverEnvUInput(gym.Env):
         cv2.destroyAllWindows()
 
 
-register(id="Liftoff-hover-uinput-v0", entry_point=LiftoffHoverEnvUInput, max_episode_steps=300)
+register(id="Liftoff-hover-v0", entry_point=LiftoffHoverEnvUInput, max_episode_steps=300)
