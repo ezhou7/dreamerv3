@@ -19,6 +19,23 @@ from steam.liftoff.telemetry import LiftoffTelemetry
 from steam.liftoff.transmitter import EvdevTransmitter
 
 
+UPRIGHT_THRESHOLD = 0.707   # drone's up-axis y-component below this ≈ tilted >45° from level
+GYRO_THRESHOLD = 3.0        # rad/s magnitude — above this we treat the drone as spinning out
+UNSTABLE_WINDOW = 10        # consecutive unstable steps that triggers a forced reset
+OOB_WINDOW = 5              # consecutive out-of-bounds steps that triggers a forced reset
+CRASH_PENALTY = -10.0       # one-shot penalty applied on the terminating step
+UNSTABLE_STEP_PENALTY = -1.0  # per-step reward when unstable — dominates the normal terms
+
+# Stability streak bonus: a per-step add-on that grows with consecutive stable
+# steps so the agent gets directly rewarded for "staying alive longer". Curve
+# is `MAX * (1 - exp(-streak / TAU))` — starts at 0, rises quickly at first,
+# and asymptotes to MAX. Capped on purpose so it remains a side objective
+# (worth at most ~15% of a perfect hover step) rather than out-competing the
+# main hover reward.
+STABILITY_STREAK_MAX = 0.15
+STABILITY_STREAK_TAU = 50.0    # steps to reach ~63% of the plateau (~5s at 10Hz step rate)
+
+
 class LiftoffHoverEnvUInput(gym.Env):
     def __init__(self, render_mode=None, screen_region=None, action_meanings=None):
         super().__init__()
@@ -40,8 +57,11 @@ class LiftoffHoverEnvUInput(gym.Env):
         self._initialized = False
         self.current_obs = None
         self.out_of_bounds_window = deque()
+        self.unstable_window = deque()
+        self._stable_streak = 0
         self._smoothed_action = np.zeros(4, dtype=np.float32)
         self._action_alpha = 0.3
+        self._prev_action = np.zeros(4, dtype=np.float32)
 
     def _lazy_init(self):
         if self._initialized:
@@ -118,19 +138,26 @@ class LiftoffHoverEnvUInput(gym.Env):
         self._lazy_init()
         self._elapsed_steps = 0
         self.out_of_bounds_window.clear()
+        self.unstable_window.clear()
+        self._stable_streak = 0
 
         self.transmitter.center_all()
 
         subprocess.run(['ydotool', 'key', '19:1', "19:0"])
         time.sleep(2)
 
-        # Arm drone: hold throttle all the way down for 1 second
+        # Arm drone: hold throttle all the way down for ~2.5 seconds. Liftoff
+        # (and most BetaFlight presets) require throttle to sit below the
+        # configured zero threshold for a sustained period before arming;
+        # 1 s was racy. The longer hold also gives the kernel time to push
+        # the min-throttle event through past EV_ABS deduplication.
         print("Arming drone...")
         self.transmitter.set_sticks(throttle=-32768)
         self.transmitter.update()
-        time.sleep(1)
+        subprocess.run(['ydotool', 'key', '2:1', "2:0"])
+        time.sleep(2)
         self.transmitter.center_all()
-        time.sleep(3)
+        time.sleep(0.1)
 
         self.min_x, self.max_x, self.min_y, self.max_y, self.min_z, self.max_z = self.__define_boundaries()
         self.target_x = (self.min_x + self.max_x) / 2.0
@@ -145,6 +172,7 @@ class LiftoffHoverEnvUInput(gym.Env):
         print(f"Relative to box: X={((x - self.min_x) / (self.max_x - self.min_x)):.2%} Y={((y - self.min_y) / (self.max_y - self.min_y)):.2%} Z={((z - self.min_z) / (self.max_z - self.min_z)):.2%}")
         self.current_obs = obs
         self._smoothed_action = np.zeros(4, dtype=np.float32)
+        self._prev_action = np.zeros(4, dtype=np.float32)
         return obs, {}
 
     def step(self, action):
@@ -156,7 +184,7 @@ class LiftoffHoverEnvUInput(gym.Env):
         pitch = int(np.clip(self._smoothed_action[2], -1.0, 1.0) * 32767)
         roll = int(np.clip(self._smoothed_action[3], -1.0, 1.0) * 32767)
 
-        print("Action: ", throttle, yaw, pitch, roll)
+        # print("Action: ", throttle, yaw, pitch, roll)
 
         self.transmitter.set_sticks(roll=roll, pitch=pitch, throttle=throttle, yaw=yaw)
         self.transmitter.update()
@@ -168,35 +196,78 @@ class LiftoffHoverEnvUInput(gym.Env):
 
         x, altitude, z = tel[0], tel[1], tel[2]
         speed = np.linalg.norm(tel[3:6])
-        qw = tel[9]
-        gyro_mag = np.linalg.norm(tel[10:13])
+        # Quaternion is (qx, qy, qz, qw) in Unity convention. Drone's up-axis
+        # in the world frame has y-component 1 - 2(qx^2 + qz^2): this is +1
+        # when perfectly level, 0 on its side, -1 inverted. Better tilt
+        # signal than qw^2 because it ignores yaw rotation around vertical.
+        qx, _qy, qz, _qw = tel[6], tel[7], tel[8], tel[9]
+        up_y = float(np.clip(1.0 - 2.0 * (qx ** 2 + qz ** 2), -1.0, 1.0))
+        gyro_mag = float(np.linalg.norm(tel[10:13]))
 
-        alt_err = altitude - self.target_y
-        r_altitude = np.exp(-0.5 * (alt_err / 2.0) ** 2)
+        # Instability check — drone is tilted past ~45° from level OR spinning
+        # faster than `GYRO_THRESHOLD`. Both are bad states for a hover.
+        is_unstable = (up_y < UPRIGHT_THRESHOLD) or (gyro_mag > GYRO_THRESHOLD)
 
-        horiz_dist = np.sqrt((x - self.target_x) ** 2 + (z - self.target_z) ** 2)
-        r_horizontal = np.exp(-0.5 * (horiz_dist / 2.0) ** 2)
+        # 3D distance to target with exp(-d) shape — sharp gradient near the target.
+        dist = np.sqrt(
+            (x - self.target_x) ** 2
+            + (altitude - self.target_y) ** 2
+            + (z - self.target_z) ** 2
+        )
+        r_position = np.exp(-dist)                       # 1 at target, ~0.37 @ 1m, ~0.05 @ 3m
+        r_velocity = np.exp(-0.5 * speed)                # rewards standing still
+        r_gyro = np.exp(-0.5 * gyro_mag)                 # rewards not rotating
+        r_upright = up_y                                 # [-1, 1] — direct upright signal
 
-        r_stability = 0.5 * np.exp(-0.5 * speed ** 2) + 0.5 * np.exp(-0.5 * gyro_mag ** 2)
+        action_delta = float(np.linalg.norm(action - self._prev_action))
+        r_smoothness = -0.02 * action_delta
+        self._prev_action = action.copy()
 
-        r_orientation = qw ** 2
+        if is_unstable:
+            # Dominate the reward when the drone is in a bad attitude — no
+            # amount of being near the target offsets being sideways or
+            # spinning out. Gradient toward "get upright" is strong.
+            self._stable_streak = 0
+            reward = UNSTABLE_STEP_PENALTY
+        else:
+            self._stable_streak += 1
+            r_streak = STABILITY_STREAK_MAX * (
+                1.0 - np.exp(-self._stable_streak / STABILITY_STREAK_TAU)
+            )
+            reward = float(
+                0.30 * r_position
+                + 0.15 * r_velocity
+                + 0.15 * r_gyro
+                + 0.30 * r_upright     # heavier weight on attitude
+                + r_smoothness
+                + 0.10                 # alive bonus
+                + r_streak             # capped "stay-alive longer" side bonus
+            )
 
-        reward = float(
-            0.40 * r_altitude
-            + 0.20 * r_horizontal
-            + 0.25 * r_stability
-            + 0.15 * r_orientation
+        # Track sustained instability — terminate if drone stays unstable
+        # for `UNSTABLE_WINDOW` consecutive steps so the agent doesn't burn
+        # the rest of the episode flailing on its back.
+        self.unstable_window.append(is_unstable)
+        if len(self.unstable_window) > UNSTABLE_WINDOW:
+            self.unstable_window.popleft()
+        unstable_too_long = (
+            len(self.unstable_window) == UNSTABLE_WINDOW
+            and all(self.unstable_window)
         )
 
         self.out_of_bounds_window.append(not self.__is_within_bounds(tel))
-        if len(self.out_of_bounds_window) > 10:
+        if len(self.out_of_bounds_window) > OOB_WINDOW:
             self.out_of_bounds_window.popleft()
+        out_of_bounds_too_long = (
+            len(self.out_of_bounds_window) == OOB_WINDOW
+            and all(self.out_of_bounds_window)
+        )
 
-        terminated = len(self.out_of_bounds_window) == 10 and all(self.out_of_bounds_window)
+        terminated = unstable_too_long or out_of_bounds_too_long
         truncated = self._elapsed_steps >= 300
 
         if terminated:
-            reward = -1.0
+            reward = CRASH_PENALTY
 
         self.current_obs = obs
 
