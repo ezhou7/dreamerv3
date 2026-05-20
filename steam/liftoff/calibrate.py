@@ -16,15 +16,25 @@ next Enter press, so sticks are at 0 while you click "Next" in Liftoff.
 
 If an axis ends up inverted in Liftoff, fix it via Fine-Tune > Invert.
 
+Press the restart hotkey ('r' by default) at any time — from either the
+terminal or the Liftoff window — to abort the current pass, recenter the
+sticks, and restart from the edge sweep. Use --restart-key to pick a
+different binding if 'r' collides with something in Liftoff.
+
 Usage:
     python -m steam.liftoff.calibrate
     python -m steam.liftoff.calibrate --auto
     python -m steam.liftoff.calibrate --auto --stage-delay 2.5
+    python -m steam.liftoff.calibrate --restart-key F8
 """
 import argparse
 import math
+import select
 import sys
+import threading
 import time
+
+import keyboard
 
 from steam.liftoff.transmitter import EvdevTransmitter
 
@@ -33,18 +43,51 @@ MIN_AXIS = -32768
 
 AXIS_INDEX = {"roll": 0, "pitch": 1, "throttle": 2, "yaw": 3}
 
+_restart_event = threading.Event()
+
+
+class RestartCalibration(Exception):
+    """Raised internally to abort the current calibration pass and restart."""
+
+
+def _check_restart():
+    if _restart_event.is_set():
+        raise RestartCalibration()
+
+
+def _on_restart_key():
+    if _restart_event.is_set():
+        return
+    _restart_event.set()
+    print("\n[!] Restart hotkey pressed — aborting current pass...")
+
 
 def _wait(auto, delay, prompt):
+    """Wait for either an Enter keystroke (interactive) or the auto-mode
+    delay to elapse. Polls the restart flag throughout so the hotkey
+    interrupts even a blocked input prompt.
+    """
     if auto:
-        time.sleep(delay)
-    else:
-        input(prompt)
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            _check_restart()
+            time.sleep(0.05)
+        return
+
+    print(prompt, end="", flush=True)
+    while True:
+        _check_restart()
+        ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+        if ready:
+            sys.stdin.readline()
+            return
 
 
 def _send(tx, sticks):
     tx.set_sticks(roll=sticks[0], pitch=sticks[1],
                   throttle=sticks[2], yaw=sticks[3])
     tx.update()
+    _check_restart()
 
 
 def _ramp_to(tx, from_sticks, to_sticks, duration=0.4, settle=0.3, rate_hz=60):
@@ -117,39 +160,74 @@ def stage_assign(tx, step_label, axis, rest_sticks, hold=2.5, ramp=0.4):
     if start_sticks != rest_sticks:
         _ramp_to(tx, rest_sticks, start_sticks, duration=ramp, settle=0)
     _ramp_to(tx, start_sticks, peak_sticks, duration=ramp, settle=0)
-    time.sleep(hold)
+    hold_end = time.monotonic() + hold
+    while time.monotonic() < hold_end:
+        _check_restart()
+        time.sleep(0.05)
     print("  -> returning to neutral")
     _ramp_to(tx, peak_sticks, new_rest)
     return new_rest
 
 
-def run(auto=False, stage_delay=2.0):
-    tx = EvdevTransmitter(with_buttons=True)
+def _run_once(tx, auto, stage_delay):
     print("Virtual transmitter created. Open Liftoff > Options > Controls > "
           "Controller > Calibrate.")
     print()
     _wait(auto, stage_delay,
           "Click 'Start Calibration' in Liftoff, then press Enter here... ")
-    try:
-        rest = stage_edges(tx)
+    rest = stage_edges(tx)
+    _wait(auto, stage_delay,
+          "Edge sweep done (sticks neutral). Click 'Next' in Liftoff, "
+          "then press Enter... ")
+
+    for step_label, axis in [
+        ("2/5", "throttle"),
+        ("3/5", "pitch"),
+        ("4/5", "roll"),
+        ("5/5", "yaw"),
+    ]:
+        rest = stage_assign(tx, step_label, axis, rest)
         _wait(auto, stage_delay,
-              "Edge sweep done (sticks neutral). Click 'Next' in Liftoff, "
-              "then press Enter... ")
+              f"{axis.capitalize()} done (sticks neutral). Click 'Next' "
+              "in Liftoff, then press Enter... ")
 
-        for step_label, axis in [
-            ("2/5", "throttle"),
-            ("3/5", "pitch"),
-            ("4/5", "roll"),
-            ("5/5", "yaw"),
-        ]:
-            rest = stage_assign(tx, step_label, axis, rest)
-            _wait(auto, stage_delay,
-                  f"{axis.capitalize()} done (sticks neutral). Click 'Next' "
-                  "in Liftoff, then press Enter... ")
+    print("\nAll stages done. In Liftoff: click SAVE (and Fine-Tune any "
+          "inverted axes / deadband).")
 
-        print("\nAll stages done. In Liftoff: click SAVE (and Fine-Tune any "
-              "inverted axes / deadband).")
+
+def run(auto=False, stage_delay=2.0, restart_key="r"):
+    tx = EvdevTransmitter(with_buttons=True)
+    hotkey_registered = False
+    try:
+        try:
+            keyboard.add_hotkey(restart_key, _on_restart_key)
+            hotkey_registered = True
+            print(f"(Press '{restart_key}' at any time — in this terminal or "
+                  f"in Liftoff — to restart calibration from the beginning.)")
+        except Exception as e:
+            print(f"[warn] Could not register restart hotkey '{restart_key}': "
+                  f"{e}. Restart hotkey unavailable; Ctrl-C to exit.",
+                  file=sys.stderr)
+
+        while True:
+            _restart_event.clear()
+            try:
+                _run_once(tx, auto, stage_delay)
+                return
+            except RestartCalibration:
+                tx.center_all()
+                print("[*] Sticks recentered. Cancel Liftoff's current "
+                      "calibration dialog (or click 'Start Calibration' "
+                      "again to restart it) before continuing.")
+                time.sleep(0.5)
+                _restart_event.clear()
+                continue
     finally:
+        if hotkey_registered:
+            try:
+                keyboard.remove_hotkey(restart_key)
+            except Exception:
+                pass
         tx.close()
 
 
@@ -161,9 +239,15 @@ def main():
     parser.add_argument("--stage-delay", type=float, default=2.0,
                         help="Seconds between stages in --auto mode "
                              "(default: 2.0).")
+    parser.add_argument("--restart-key", default="r",
+                        help="Global hotkey that aborts the current pass "
+                             "and restarts from the edge sweep (default: "
+                             "'r'). Use any name the 'keyboard' library "
+                             "accepts, e.g. 'F8' or 'ctrl+r'.")
     args = parser.parse_args()
     try:
-        run(auto=args.auto, stage_delay=args.stage_delay)
+        run(auto=args.auto, stage_delay=args.stage_delay,
+            restart_key=args.restart_key)
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)
         sys.exit(1)
