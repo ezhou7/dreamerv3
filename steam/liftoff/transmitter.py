@@ -19,14 +19,17 @@ RC_CHANNEL_AXES = [
 ]
 
 
-def _create_transmitter(with_buttons=False):
+def _create_transmitter(with_buttons=True):
     """Create a virtual RC transmitter via evdev UInput.
 
     Mimics a USB-connected FPV radio (e.g. FrSky, RadioMaster)
     presenting as a 6-channel joystick device.
 
-    If `with_buttons` is True, declares 8 BTN_JOYSTICK keys so SDL2/Unity
-    classify the device as a joystick rather than a generic input device.
+    Defaults to declaring 8 BTN_JOYSTICK keys so the kernel/udev tags the
+    device with ID_INPUT_JOYSTICK=1 and SDL2/Unity classify it as a
+    joystick. This must match the capability set used during Liftoff's
+    calibration, otherwise Liftoff sees calibration-time and runtime as
+    different device classes and stored bindings won't apply.
     """
     # All channels use the same range as real RC transmitters
     channel_info = AbsInfo(value=0, min=-32768, max=32767, fuzz=0, flat=0, resolution=0)
@@ -51,7 +54,7 @@ def _create_transmitter(with_buttons=False):
 class EvdevTransmitter:
     """Virtual RC transmitter that sends stick inputs via evdev UInput."""
 
-    def __init__(self, with_buttons=False):
+    def __init__(self, with_buttons=True):
         self.device = _create_transmitter(with_buttons=with_buttons)
         self._pending = False
 
