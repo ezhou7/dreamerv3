@@ -7,3 +7,7 @@ MUJOCO_LOG.TXT
 ;
 venv/
 .venv*/
+
+# Private working notes
+aerial/PLAN.md
+aerial/RESULTS.md
