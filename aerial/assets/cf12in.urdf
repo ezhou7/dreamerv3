@@ -1,0 +1,122 @@
+<?xml version="1.0" ?>
+
+<!-- 12-inch multirotor URDF for gym-pybullet-drones.
+
+Parameters chosen to match aerial/configs/airframe_12in.py placeholder
+estimates for a generic long-range / cine-FPV 12" quad. Refine with
+measured airframe values before Phase 4 (SITL) and Phase 5 (real flight).
+
+Derivations from airframe_12in.py (mass=0.8kg, TWR=3.06, arm=0.15m,
+max_thrust=6N/motor):
+
+  Total max thrust = 4 * 6.0 = 24 N
+  MAX_RPM = sqrt(t2w * m*g / (4*kf))
+  We pick MAX_RPM ≈ 15000 (realistic for 5-6" prop @ ~6S, 2000KV)
+  => kf = 6.0 / 15000^2 = 2.67e-8 N/(RPM^2)
+
+  km/kf ratio for typical props ≈ 0.016
+  => km = 4.27e-10 N·m/(RPM^2)
+
+Motor positions in X-frame (arm 0.15m = sqrt(x^2 + y^2)):
+  x = y = 0.15 / sqrt(2) ≈ 0.1061
+  prop0 front-right: (+0.106, -0.106, 0)
+  prop1 back-right:  (-0.106, -0.106, 0)
+  prop2 back-left:   (-0.106, +0.106, 0)
+  prop3 front-left:  (+0.106, +0.106, 0)
+
+Drag / ground-effect / downwash coefficients are rough scale-ups from
+cf2x. Not measured; only affects flight quality in aggressive maneuvers
+and near-ground hover. Domain randomization should cover the
+uncertainty.
+-->
+
+<robot name="cf12in">
+
+  <properties arm="0.15" kf="2.67e-8" km="4.27e-10" thrust2weight="3.06" max_speed_kmh="80" gnd_eff_coeff="11.36859" prop_radius="0.075" drag_coeff_xy="9.18e-6" drag_coeff_z="1.03e-5" dw_coeff_1="2267.18" dw_coeff_2=".16" dw_coeff_3="-.11" />
+
+  <link name="base_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.8"/>
+      <inertia ixx="0.008" ixy="0.0" ixz="0.0" iyy="0.008" iyz="0.0" izz="0.015"/>
+    </inertial>
+
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.30 0.30 0.05"/>
+      </geometry>
+      <material name="dark_grey">
+        <color rgba=".3 .3 .3 1"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.18" length="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="prop0_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.1061 -0.1061 0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+  <joint name="prop0_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="prop0_link"/>
+  </joint>
+
+  <link name="prop1_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.1061 -0.1061 0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+  <joint name="prop1_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="prop1_link"/>
+  </joint>
+
+  <link name="prop2_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.1061 0.1061 0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+  <joint name="prop2_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="prop2_link"/>
+  </joint>
+
+  <link name="prop3_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.1061 0.1061 0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+  <joint name="prop3_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="prop3_link"/>
+  </joint>
+
+  <link name="center_of_mass_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+  </link>
+  <joint name="center_of_mass_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="center_of_mass_link"/>
+  </joint>
+
+</robot>
