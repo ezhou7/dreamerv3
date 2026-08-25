@@ -63,7 +63,75 @@ class DomainRandomizationRanges:
     wind_force_sigma_N: float = 0.3      # ~4% of hover thrust
 
 
-DEFAULT = DomainRandomizationRanges()
+# --- Full target ranges (Phase 1c = original DEFAULT) ------------------
+STAGE_1C = DomainRandomizationRanges()
+
+# --- Phase 1a: easy start for curriculum learning ----------------------
+# Roughly half the range of Phase 1c on every dimension. Phase 1's first
+# training attempt showed that presenting the full DR + init range from
+# step 0 kept the policy bimodal — it never consolidated because too many
+# starting configurations were essentially unrecoverable.
+STAGE_1A = DomainRandomizationRanges(
+    mass_scale=(0.90, 1.10),
+    inertia_scale=(0.90, 1.10),
+    motor_thrust_scale=(0.92, 1.08),
+    motor_tau_scale=(0.85, 1.15),
+    rate_kp_scale=(0.90, 1.10),
+    control_latency_s=(0.000, 0.015),
+    init_pos_range_m=(-0.5, 0.5),
+    init_z_range_m=(-0.3, 0.3),
+    init_rpy_range_deg=(-10.0, 10.0),
+    gyro_noise_sigma_rad_s=0.025,
+    accel_noise_sigma_m_s2=0.05,
+    pos_noise_sigma_m=0.01,
+    vel_noise_sigma_m_s=0.025,
+    wind_force_sigma_N=0.15,
+)
+
+# --- Phase 1b: intermediate (added later when 1a converges) ------------
+# Placeholder; will be tuned based on 1a results.
+STAGE_1B = DomainRandomizationRanges(
+    mass_scale=(0.85, 1.15),
+    inertia_scale=(0.85, 1.15),
+    motor_thrust_scale=(0.88, 1.12),
+    motor_tau_scale=(0.78, 1.22),
+    rate_kp_scale=(0.85, 1.15),
+    control_latency_s=(0.000, 0.022),
+    init_pos_range_m=(-1.0, 1.0),
+    init_z_range_m=(-0.5, 0.5),
+    init_rpy_range_deg=(-20.0, 20.0),
+    gyro_noise_sigma_rad_s=0.038,
+    accel_noise_sigma_m_s2=0.075,
+    pos_noise_sigma_m=0.015,
+    vel_noise_sigma_m_s=0.038,
+    wind_force_sigma_N=0.22,
+)
+
+_STAGES = {
+    "1a": STAGE_1A,
+    "1b": STAGE_1B,
+    "1c": STAGE_1C,
+}
+
+
+def get_stage(name: str) -> DomainRandomizationRanges:
+    """Look up a named curriculum stage's DR ranges.
+
+    Accepts "1a", "1b", "1c" (case-insensitive). Falls back to full-range
+    STAGE_1C if the name is unrecognized so training never silently runs
+    with no randomization.
+    """
+    key = name.strip().lower()
+    if key not in _STAGES:
+        raise ValueError(
+            f"Unknown DR stage {name!r}. Expected one of {sorted(_STAGES)}."
+        )
+    return _STAGES[key]
+
+
+# Backwards compatibility: existing code uses `DEFAULT`. Point it at the
+# full-difficulty stage so old callers keep the same behavior.
+DEFAULT = STAGE_1C
 
 
 def sample_episode_params(rng: np.random.Generator,
