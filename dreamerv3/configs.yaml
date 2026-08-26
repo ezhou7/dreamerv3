@@ -222,6 +222,27 @@ aerial_12in_curriculum_1a_eval:
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
+aerial_12in_curriculum_1b:
+  # Phase 1b: medium domain-randomization ranges, warm-started from a
+  # Phase 1a checkpoint. Same model size as 1a so the checkpoint loads
+  # cleanly. Fewer steps than 1a because the model already knows how to
+  # hover; 1b only needs to adapt to wider disturbances.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1.5e6, envs: 1, train_ratio: 32}
+  env: {aerial: {gui: False, dr_stage: '1b'}}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1b_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1b'}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
 dmlab:
   task: dmlab_explore_goal_locations_small
   run: {steps: 2.6e7, train_ratio: 32}
