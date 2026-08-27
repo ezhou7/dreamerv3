@@ -222,6 +222,28 @@ aerial_12in_curriculum_1a_eval:
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
+aerial_12in_curriculum_1a5:
+  # Phase 1a5: bridge stage between 1a and 1b. Added after the direct
+  # 1a -> 1b jump plateaued at ~60% success in eval; the init-pose range
+  # jump from +/-0.5m to +/-1.0m was too large. 1a5 sits at the midpoint
+  # (+/-0.75m, +/-15 deg) so the policy can climb the curriculum step by
+  # step. Warm-started from the Phase 1a extended checkpoint.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1.5e6, envs: 1, train_ratio: 32}
+  env: {aerial: {gui: False, dr_stage: '1a5'}}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1a5_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1a5'}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
 aerial_12in_curriculum_1b:
   # Phase 1b: medium domain-randomization ranges, warm-started from a
   # Phase 1a checkpoint. Same model size as 1a so the checkpoint loads
