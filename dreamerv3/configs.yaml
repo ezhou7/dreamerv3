@@ -180,6 +180,26 @@ aerial_pybullet_eval:
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
+aerial_12in_pybullet:
+  # Phase 1: 12" airframe hover training with domain randomization.
+  # Bigger world model than Phase 0 (size12m instead of size1m) — the
+  # 12" quad + heavy DR is a harder task than a Crazyflie in ideal
+  # physics. Longer training horizon reflects that.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 5.1e6, envs: 1, train_ratio: 32}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_pybullet_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
 dmlab:
   task: dmlab_explore_goal_locations_small
   run: {steps: 2.6e7, train_ratio: 32}

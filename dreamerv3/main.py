@@ -220,6 +220,7 @@ def make_env(config, index, **overrides):
   if suite == 'aerial':
     from embodied.envs import from_gym
     import aerial.envs.hover_pybullet_env  # noqa: F401  (registers env)
+    import aerial.envs.hover_12in_env  # noqa: F401  (registers env)
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',

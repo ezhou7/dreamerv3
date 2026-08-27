@@ -40,6 +40,20 @@ W_UPRIGHT = 0.30
 W_SMOOTHNESS = 0.02
 SURVIVAL_BONUS = 0.10
 
+# --- Shaping tuned from Phase 0 quantitative eval -----------------------
+# Phase 0 policy hovered at ~0.58m offset with ~0.5m/s drift because the
+# original exp(-dist) and exp(-0.5*speed) gave too much partial credit
+# for "close enough". Sharpening the decay forces the policy to actually
+# nail the target instead of settling into a stable orbit.
+POSITION_DECAY = 2.0        # was 1.0 in Phase 0
+VELOCITY_DECAY = 1.0        # was 0.5 in Phase 0
+
+# Tight-target bonus: flat additive reward when the drone is within
+# TIGHT_TARGET_RADIUS meters of the target. Small enough not to dominate
+# but large enough to break ties in favor of "actually on target".
+TIGHT_TARGET_BONUS = 0.10
+TIGHT_TARGET_RADIUS = 0.2   # meters
+
 
 @dataclass
 class RewardState:
@@ -98,14 +112,15 @@ def step_reward(pos_err, vel, gyro, up_axis, action, state):
         }
 
     state.stable_streak += 1
-    r_position = float(np.exp(-dist))
-    r_velocity = float(np.exp(-0.5 * speed))
+    r_position = float(np.exp(-POSITION_DECAY * dist))
+    r_velocity = float(np.exp(-VELOCITY_DECAY * speed))
     r_gyro = float(np.exp(-0.5 * gyro_mag))
     r_upright = float(up_axis)
     r_smoothness = -W_SMOOTHNESS * action_delta
     r_streak = STABILITY_STREAK_MAX * (
         1.0 - float(np.exp(-state.stable_streak / STABILITY_STREAK_TAU))
     )
+    r_tight = TIGHT_TARGET_BONUS if dist < TIGHT_TARGET_RADIUS else 0.0
 
     reward = (
         W_POSITION * r_position
@@ -115,6 +130,7 @@ def step_reward(pos_err, vel, gyro, up_axis, action, state):
         + r_smoothness
         + SURVIVAL_BONUS
         + r_streak
+        + r_tight
     )
 
     return float(reward), {
@@ -129,5 +145,6 @@ def step_reward(pos_err, vel, gyro, up_axis, action, state):
         "r_upright": r_upright,
         "r_smoothness": r_smoothness,
         "r_streak": r_streak,
+        "r_tight": r_tight,
         "streak": float(state.stable_streak),
     }
