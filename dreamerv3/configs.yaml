@@ -35,6 +35,7 @@ defaults:
     minecraft: {size: [64, 64], break_speed: 100.0, logs: False, length: 36000}
     dmc: {size: [64, 64], repeat: 1, proprio: True, image: True, camera: -1}
     loconav: {size: [64, 64], repeat: 1, camera: -1}
+    aerial: {gui: False}
 
   replay:
     size: 5e6
@@ -160,6 +161,23 @@ liftoff:
   task: liftoff_liftoff
   run: {envs: 1, train_ratio: 32}
   jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_pybullet:
+  <<: *size1m
+  task: aerial_hover-pybullet
+  run: {steps: 1.1e6, envs: 1, train_ratio: 32}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_pybullet_eval:
+  <<: *size1m
+  task: aerial_hover-pybullet
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True}}
+  # GPU 0 by default so it doesn't contend with a training run on GPU 1.
+  jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
 dmlab:

@@ -1,8 +1,13 @@
 .pytest_cache
 dist
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *.egg-info
 MUJOCO_LOG.TXT
 ;
 venv/
+.venv*/
+
+# Private working notes
+aerial/PLAN.md
+aerial/RESULTS.md
