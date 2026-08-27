@@ -43,7 +43,7 @@ from aerial.spec.reward import (
 from aerial.controllers.rate_controller import BodyRateController, DEFAULT_KP
 from aerial.configs.airframe_12in import DEFAULT_12IN
 from aerial.configs.domain_randomization import (
-    DEFAULT as DR_DEFAULT,
+    get_stage as get_dr_stage,
     sample_episode_params,
     sample_init_pose,
     add_sensor_noise,
@@ -149,10 +149,14 @@ class Hover12inEnv(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, render_mode=None, gui=False):
+    def __init__(self, render_mode=None, gui=False, dr_stage="1c"):
         super().__init__()
         self.render_mode = render_mode
         self._gui = bool(gui) or (render_mode == "human")
+        # Curriculum stage picks the domain-randomization range table.
+        # "1a" = easy, "1b" = medium, "1c" = full target ranges.
+        self._dr_ranges = get_dr_stage(dr_stage)
+        self._dr_stage = dr_stage
 
         self.action_space = Box(
             low=-1.0, high=1.0,
@@ -190,7 +194,7 @@ class Hover12inEnv(gym.Env):
         self._controller.reset()
 
         # 1. Draw episode-wide randomization: mass/motor/rate-gain/etc.
-        self._episode_params = sample_episode_params(self._rng, DR_DEFAULT)
+        self._episode_params = sample_episode_params(self._rng, self._dr_ranges)
 
         # 2. Apply rate-controller gain jitter.
         self._controller.kp = (
@@ -208,7 +212,7 @@ class Hover12inEnv(gym.Env):
 
         # 4. Sample init pose (wide: ±2m xy, ±1m z, ±30° rpy).
         init_pos, init_rpy_rad = sample_init_pose(
-            self._rng, TARGET_POSITION, DR_DEFAULT)
+            self._rng, TARGET_POSITION, self._dr_ranges)
 
         # 5. Create or repose the sim.
         if self._sim is None:
@@ -262,7 +266,7 @@ class Hover12inEnv(gym.Env):
         gyro_true = state[13:16]
         # Noisy gyro for rate loop (mimics real IMU that the FC would see).
         gyro_noisy = gyro_true + self._rng.normal(
-            0.0, DR_DEFAULT.gyro_noise_sigma_rad_s, size=3
+            0.0, self._dr_ranges.gyro_noise_sigma_rad_s, size=3
         ).astype(gyro_true.dtype)
 
         dt = 1.0 / STEP_RATE_HZ
@@ -357,7 +361,7 @@ class Hover12inEnv(gym.Env):
             accel=None,
             pos=pos_true,
             vel=vel_true,
-            ranges=DR_DEFAULT,
+            ranges=self._dr_ranges,
         )
 
         obs_vec = get_obs_vector(

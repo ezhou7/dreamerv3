@@ -35,7 +35,7 @@ defaults:
     minecraft: {size: [64, 64], break_speed: 100.0, logs: False, length: 36000}
     dmc: {size: [64, 64], repeat: 1, proprio: True, image: True, camera: -1}
     loconav: {size: [64, 64], repeat: 1, camera: -1}
-    aerial: {gui: False}
+    aerial: {gui: False, dr_stage: '1c'}
 
   replay:
     size: 5e6
@@ -58,6 +58,7 @@ defaults:
     eval_eps: 1
     report_batches: 1
     from_checkpoint: ''
+    from_checkpoint_regex: '.*'
     episode_timeout: 180
     actor_addr: 'localhost:{auto}'
     replay_addr: 'localhost:{auto}'
@@ -197,6 +198,27 @@ aerial_12in_pybullet_eval:
   script: eval_only
   run: {steps: 1e6, envs: 1, log_every: 30}
   env: {aerial: {gui: True}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1a:
+  # Phase 1a: narrow init + reduced DR for curriculum learning. Same
+  # model size as aerial_12in_pybullet so a Phase 1a checkpoint can be
+  # warm-started into 1b/1c later. Fewer training steps because the
+  # easier task should converge faster; extend if the run plateaus low.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1.5e6, envs: 1, train_ratio: 32}
+  env: {aerial: {gui: False, dr_stage: '1a'}}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1a_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1a'}}
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
