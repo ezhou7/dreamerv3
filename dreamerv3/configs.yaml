@@ -108,7 +108,7 @@ defaults:
     imag_length: 15
     horizon: 333
     contdisc: True
-    imag_loss: {slowtar: False, lam: 0.95, actent: 3e-4, slowreg: 1.0}
+    imag_loss: {slowtar: False, lam: 0.95, actent: 3e-4, slowreg: 1.0, smooth_coef: 0.0}
     repl_loss: {slowtar: False, lam: 0.95, slowreg: 1.0}
     slowvalue: {rate: 0.02, every: 1}
     retnorm: {impl: perc, rate: 0.01, limit: 1.0, perclo: 5.0, perchi: 95.0, debias: False}
@@ -262,6 +262,41 @@ aerial_12in_curriculum_1b_eval:
   script: eval_only
   run: {steps: 1e6, envs: 1, log_every: 30}
   env: {aerial: {gui: True, dr_stage: '1b'}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
+aerial_12in_skydreamer:
+  # SkyDreamer-inspired setup: skip all curriculum, train from scratch
+  # on full-range domain randomization for a long single-phase run.
+  # Motor smoothness regularization added to prevent bang-bang behavior,
+  # following the SkyDreamer paper (arxiv 2510.14783).
+  #
+  # Design choices compared to our earlier failed attempts:
+  #   - No warm-starting: fresh init, single training run.
+  #   - No curriculum on DR: Stage 1c ranges from step 0.
+  #   - Long training: 10M steps (~13h) vs the 1.5M we ran before.
+  #   - actent stays at the DreamerV3 default 3e-4 for full exploration.
+  #   - smooth_coef 0.002 penalizes policy-mean action changes across
+  #     consecutive imagination steps, preventing motor chattering.
+  # Motivation: every failed prior attempt (curriculum-with-warm-start,
+  # continuous DR ramp, BC anchor) tried to fix an "actor forgets on
+  # distribution shift" problem that SkyDreamer's approach sidesteps
+  # entirely by never having a distribution shift.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1e7, envs: 1, train_ratio: 32}
+  replay.size: 5e5
+  env: {aerial: {gui: False, dr_stage: '1c'}}
+  agent.imag_loss.smooth_coef: 0.002
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_skydreamer_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1c'}}
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
