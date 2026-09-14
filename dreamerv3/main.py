@@ -217,6 +217,9 @@ def make_env(config, index, **overrides):
   if suite == 'liftoff':
     from embodied.envs import from_gym
     import steam.liftoff.hover_env_uinput
+  if suite == 'aerial':
+    from embodied.envs import from_gym
+    import aerial.envs.hover_pybullet_env  # noqa: F401  (registers env)
   ctor = {
       'dummy': 'embodied.envs.dummy:Dummy',
       'gym': 'embodied.envs.from_gym:FromGym',
@@ -236,6 +239,8 @@ def make_env(config, index, **overrides):
           f'MemoryMaze-{task}-v0', **kw),
       'liftoff': lambda task, **kw: from_gym.FromGym(
           'Liftoff-hover-v0', **kw),
+      'aerial': lambda task, **kw: from_gym.FromGym(
+          f'Aerial-{task}-v0', **kw),
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
