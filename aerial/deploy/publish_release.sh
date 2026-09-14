@@ -105,18 +105,53 @@ NOTES_FILE="$STAGE_DIR/notes.md"
   fi
 } > "$NOTES_FILE"
 
-# Create the release + upload the tarball and sha256. If the release
-# already exists, use gh release upload instead.
-if gh release view "$TAG" >/dev/null 2>&1; then
-  echo "release $TAG already exists; uploading new assets (--clobber)"
-  gh release upload "$TAG" "$TARBALL" "$SHA256_FILE" --clobber
+# Create the release + upload the tarball and sha256 via the REST API.
+# We use `gh api` rather than `gh release create` because the latter
+# requires the "workflow" scope while the former works with the default
+# "repo" scope from `gh auth login`.
+REPO_SLUG=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# Check whether the release already exists; if so, reuse its id and
+# clobber the assets.
+if RELEASE_JSON=$(gh api "repos/$REPO_SLUG/releases/tags/$TAG" 2>/dev/null); then
+  RELEASE_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+  echo "release $TAG already exists (id=$RELEASE_ID); replacing assets"
+  # Delete existing assets with the same names so re-upload doesn't 422.
+  for NAME in "$BUNDLE.tar.gz" "$BUNDLE.tar.gz.sha256"; do
+    ASSET_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c "
+import sys,json
+d = json.load(sys.stdin)
+for a in d.get('assets', []):
+    if a['name'] == '$NAME':
+        print(a['id']); break
+")
+    if [[ -n "$ASSET_ID" ]]; then
+      gh api "repos/$REPO_SLUG/releases/assets/$ASSET_ID" -X DELETE
+    fi
+  done
 else
-  gh release create "$TAG" \
-    --title "Model: $BUNDLE" \
-    --notes-file "$NOTES_FILE" \
-    "$TARBALL" "$SHA256_FILE"
+  BODY=$(cat "$NOTES_FILE")
+  RELEASE_JSON=$(gh api "repos/$REPO_SLUG/releases" -X POST \
+    -f "tag_name=$TAG" \
+    -f "name=Model: $BUNDLE" \
+    -f "body=$BODY" \
+    -F "draft=false" \
+    -F "prerelease=false")
+  RELEASE_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+  echo "created release id=$RELEASE_ID"
 fi
 
 echo ""
+echo "-- uploading $BUNDLE.tar.gz --"
+gh api "https://uploads.github.com/repos/$REPO_SLUG/releases/$RELEASE_ID/assets?name=$BUNDLE.tar.gz" \
+  -X POST -H 'Content-Type: application/gzip' --input "$TARBALL" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(' ', d.get('name'), d.get('size'), 'bytes')"
+
+echo "-- uploading $BUNDLE.tar.gz.sha256 --"
+gh api "https://uploads.github.com/repos/$REPO_SLUG/releases/$RELEASE_ID/assets?name=$BUNDLE.tar.gz.sha256" \
+  -X POST -H 'Content-Type: text/plain' --input "$SHA256_FILE" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(' ', d.get('name'), d.get('size'), 'bytes')"
+
+echo ""
 echo "release URL:"
-gh release view "$TAG" --json url -q .url
+printf '  https://github.com/%s/releases/tag/%s\n' "$REPO_SLUG" "$TAG"
