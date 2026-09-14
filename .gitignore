@@ -11,3 +11,7 @@ venv/
 # Private working notes
 aerial/PLAN.md
 aerial/RESULTS.md
+
+# Model bundles produced by aerial/deploy/export_model.py -- large
+# binaries that belong in GitHub Releases, not git.
+aerial/deploy/models/
