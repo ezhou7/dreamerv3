@@ -390,6 +390,7 @@ def imag_loss(
     lam=0.95,
     actent=3e-4,
     slowreg=1.0,
+    smooth_coef=0.0,
 ):
   losses = {}
   metrics = {}
@@ -412,6 +413,18 @@ def imag_loss(
   ents = {k: v.entropy()[:, :-1] for k, v in policy.items()}
   policy_loss = sg(weight[:, :-1]) * -(
       logpi * sg(adv_normed) + actent * sum(ents.values()))
+
+  # Motor smoothness regularization: penalize policy-mean changes across
+  # consecutive imagination timesteps to prevent bang-bang behavior. From
+  # SkyDreamer (arxiv 2510.14783).
+  if smooth_coef > 0.0:
+    means = jnp.concatenate(
+        [v.pred() for v in policy.values()], axis=-1)
+    diffs = means[:, 1:] - means[:, :-1]
+    smooth_loss = smooth_coef * jnp.square(diffs).sum(-1)
+    policy_loss = policy_loss + sg(weight[:, :-1]) * smooth_loss
+    metrics['smooth_loss'] = smooth_loss.mean()
+
   losses['policy'] = policy_loss
 
   voffset, vscale = valnorm(ret, update)

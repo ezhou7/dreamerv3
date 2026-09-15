@@ -88,6 +88,29 @@ STAGE_1A = DomainRandomizationRanges(
     wind_force_sigma_N=0.15,
 )
 
+# --- Phase 1a5: bridge stage between 1a and 1b -------------------------
+# Added after the direct 1a -> 1b jump plateaued at ~60% success in eval:
+# the ±1.0m / ±20 deg init range was too big a step from 1a's ±0.5m /
+# ±10 deg for the policy to cross by training longer alone. 1a5 sits at
+# roughly the midpoint on every dimension, so the policy can climb the
+# curriculum instead of getting stuck.
+STAGE_1A5 = DomainRandomizationRanges(
+    mass_scale=(0.88, 1.12),
+    inertia_scale=(0.88, 1.12),
+    motor_thrust_scale=(0.90, 1.10),
+    motor_tau_scale=(0.82, 1.18),
+    rate_kp_scale=(0.88, 1.12),
+    control_latency_s=(0.000, 0.018),
+    init_pos_range_m=(-0.75, 0.75),
+    init_z_range_m=(-0.4, 0.4),
+    init_rpy_range_deg=(-15.0, 15.0),
+    gyro_noise_sigma_rad_s=0.031,
+    accel_noise_sigma_m_s2=0.063,
+    pos_noise_sigma_m=0.012,
+    vel_noise_sigma_m_s=0.031,
+    wind_force_sigma_N=0.18,
+)
+
 # --- Phase 1b: intermediate (added later when 1a converges) ------------
 # Placeholder; will be tuned based on 1a results.
 STAGE_1B = DomainRandomizationRanges(
@@ -109,6 +132,7 @@ STAGE_1B = DomainRandomizationRanges(
 
 _STAGES = {
     "1a": STAGE_1A,
+    "1a5": STAGE_1A5,
     "1b": STAGE_1B,
     "1c": STAGE_1C,
 }
