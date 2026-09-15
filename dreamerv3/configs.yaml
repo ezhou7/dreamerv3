@@ -108,7 +108,7 @@ defaults:
     imag_length: 15
     horizon: 333
     contdisc: True
-    imag_loss: {slowtar: False, lam: 0.95, actent: 3e-4, slowreg: 1.0}
+    imag_loss: {slowtar: False, lam: 0.95, actent: 3e-4, slowreg: 1.0, smooth_coef: 0.0}
     repl_loss: {slowtar: False, lam: 0.95, slowreg: 1.0}
     slowvalue: {rate: 0.02, every: 1}
     retnorm: {impl: perc, rate: 0.01, limit: 1.0, perclo: 5.0, perchi: 95.0, debias: False}
@@ -219,6 +219,84 @@ aerial_12in_curriculum_1a_eval:
   script: eval_only
   run: {steps: 1e6, envs: 1, log_every: 30}
   env: {aerial: {gui: True, dr_stage: '1a'}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1a5:
+  # Phase 1a5: bridge stage between 1a and 1b. Added after the direct
+  # 1a -> 1b jump plateaued at ~60% success in eval; the init-pose range
+  # jump from +/-0.5m to +/-1.0m was too large. 1a5 sits at the midpoint
+  # (+/-0.75m, +/-15 deg) so the policy can climb the curriculum step by
+  # step. Warm-started from the Phase 1a extended checkpoint.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1.5e6, envs: 1, train_ratio: 32}
+  env: {aerial: {gui: False, dr_stage: '1a5'}}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1a5_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1a5'}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1b:
+  # Phase 1b: medium domain-randomization ranges, warm-started from a
+  # Phase 1a checkpoint. Same model size as 1a so the checkpoint loads
+  # cleanly. Fewer steps than 1a because the model already knows how to
+  # hover; 1b only needs to adapt to wider disturbances.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1.5e6, envs: 1, train_ratio: 32}
+  env: {aerial: {gui: False, dr_stage: '1b'}}
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_curriculum_1b_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1b'}}
+  jax.cuda_visible_devices: '0'
+  jax.compute_dtype: float32
+
+aerial_12in_skydreamer:
+  # SkyDreamer-inspired setup: skip all curriculum, train from scratch
+  # on full-range domain randomization for a long single-phase run.
+  # Motor smoothness regularization added to prevent bang-bang behavior,
+  # following the SkyDreamer paper (arxiv 2510.14783).
+  #
+  # Design choices compared to our earlier failed attempts:
+  #   - No warm-starting: fresh init, single training run.
+  #   - No curriculum on DR: Stage 1c ranges from step 0.
+  #   - Long training: 10M steps (~13h) vs the 1.5M we ran before.
+  #   - actent stays at the DreamerV3 default 3e-4 for full exploration.
+  #   - smooth_coef 0.002 penalizes policy-mean action changes across
+  #     consecutive imagination steps, preventing motor chattering.
+  # Motivation: every failed prior attempt (curriculum-with-warm-start,
+  # continuous DR ramp, BC anchor) tried to fix an "actor forgets on
+  # distribution shift" problem that SkyDreamer's approach sidesteps
+  # entirely by never having a distribution shift.
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1e7, envs: 1, train_ratio: 32}
+  replay.size: 5e5
+  env: {aerial: {gui: False, dr_stage: '1c'}}
+  agent.imag_loss.smooth_coef: 0.002
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
+aerial_12in_skydreamer_eval:
+  <<: *size12m
+  task: aerial_hover-12in
+  script: eval_only
+  run: {steps: 1e6, envs: 1, log_every: 30}
+  env: {aerial: {gui: True, dr_stage: '1c'}}
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
