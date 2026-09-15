@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import pickle
+import re
 import shutil
 import time
 from pathlib import Path
@@ -50,11 +51,31 @@ def strip_ref_pol(src_agent_pkl, dst_agent_pkl):
     return before != after, before - after
 
 
+def sanitize_path(value):
+    """Redact anything that looks like an absolute path under a user's
+    home directory. Replaces the /home/<user>/ prefix with ~/ so bundles
+    published to the public don't leak the local Linux username. Leaves
+    non-string / non-home-path values untouched.
+    """
+    if not isinstance(value, str):
+        return value
+    home = os.path.expanduser('~')  # /home/<user>
+    # Also cover the generic /home/<any>/ prefix in case a config was
+    # copied over from another machine.
+    m = re.match(r'^(/home/[^/]+)(/.*)?$', value)
+    if m:
+        return '~' + (m.group(2) or '')
+    if value.startswith(home):
+        return '~' + value[len(home):]
+    return value
+
+
 def force_cpu_config(cfg):
     """Patch a run's saved config so downstream loaders don't try to grab
-    a GPU that isn't there, and drop keys that no longer exist in the
-    current code paths (config-schema drift from removed experiments
-    like BC regularization and continuous curriculum). Idempotent."""
+    a GPU that isn't there, drop keys that no longer exist in the current
+    code paths (config-schema drift from removed experiments like BC
+    regularization and continuous curriculum), and sanitize absolute
+    paths that leak the local Linux username. Idempotent."""
     # Env kwargs the current Hover12inEnv accepts.
     AERIAL_ENV_ALLOWED = {'gui', 'dr_stage'}
     # Kwargs the current imag_loss accepts.
@@ -78,6 +99,12 @@ def force_cpu_config(cfg):
                 for k in list(imag_loss.keys()):
                     if k not in IMAG_LOSS_ALLOWED:
                         imag_loss.pop(k)
+        # Sanitize known path-carrying fields.
+        if 'logdir' in cfg:
+            cfg['logdir'] = sanitize_path(cfg['logdir'])
+        run = cfg.get('run')
+        if isinstance(run, dict) and 'from_checkpoint' in run:
+            run['from_checkpoint'] = sanitize_path(run['from_checkpoint'])
     return cfg
 
 
@@ -129,11 +156,12 @@ def main():
     with (dst / 'config.yaml').open('w') as f:
         yaml.YAML(typ='safe').dump(cfg, f)
 
-    # Metadata.
+    # Metadata. Sanitize path fields to avoid leaking the local username
+    # via published release tarballs.
     meta = {
         'name': args.name,
-        'src_logdir': str(logdir),
-        'src_ckpt': str(src_ckpt),
+        'src_logdir': sanitize_path(str(logdir)),
+        'src_ckpt': sanitize_path(str(src_ckpt)),
         'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
         'agent_pkl_sha256': sha256_of(dst / 'agent.pkl'),
         'stripped_ref_pol_keys': n_stripped if stripped else 0,

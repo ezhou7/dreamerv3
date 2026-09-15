@@ -112,8 +112,10 @@ NOTES_FILE="$STAGE_DIR/notes.md"
 REPO_SLUG=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
 # Check whether the release already exists; if so, reuse its id and
-# clobber the assets.
-if RELEASE_JSON=$(gh api "repos/$REPO_SLUG/releases/tags/$TAG" 2>/dev/null); then
+# clobber the assets. `|| true` prevents `set -e` from tripping when the
+# release doesn't exist (gh api returns non-zero on 404).
+RELEASE_JSON=$(gh api "repos/$REPO_SLUG/releases/tags/$TAG" 2>/dev/null || true)
+if [[ -n "$RELEASE_JSON" ]]; then
   RELEASE_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
   echo "release $TAG already exists (id=$RELEASE_ID); replacing assets"
   # Delete existing assets with the same names so re-upload doesn't 422.
