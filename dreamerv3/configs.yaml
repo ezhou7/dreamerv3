@@ -300,6 +300,26 @@ aerial_12in_skydreamer_eval:
   jax.cuda_visible_devices: '0'
   jax.compute_dtype: float32
 
+aerial_12in_skydreamer_1b:
+  # SkyDreamer recipe (aerial_12in_skydreamer) targeted at Stage 1b
+  # instead of Stage 1c. Same proven setup (from scratch, motor
+  # smoothness reg, single long run) but on the moderate-DR
+  # distribution -- the 1c-trained checkpoint hits 42% on Stage 1c but
+  # 94% on 1a, 72% on 1b, suggesting the 1c ceiling is Bayes-limit at
+  # the extreme edges, not policy holes. A run targeted directly at 1b
+  # should push its 72% zero-shot number toward 90%+ and give a
+  # sim2real-viable policy at moderate DR (per "One Net to Rule Them
+  # All", arxiv 2504.21586: ~10% DR gives best real-world transfer).
+  # 17M steps matches what worked at 1c (28% @ 10M -> 36% @ 17M).
+  <<: *size12m
+  task: aerial_hover-12in
+  run: {steps: 1.7e7, envs: 1, train_ratio: 32}
+  replay.size: 5e5
+  env: {aerial: {gui: False, dr_stage: '1b'}}
+  agent.imag_loss.smooth_coef: 0.002
+  jax.cuda_visible_devices: '1'
+  jax.compute_dtype: float32
+
 dmlab:
   task: dmlab_explore_goal_locations_small
   run: {steps: 2.6e7, train_ratio: 32}
