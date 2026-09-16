@@ -15,3 +15,6 @@ aerial/RESULTS.md
 # Model bundles produced by aerial/deploy/export_model.py -- large
 # binaries that belong in GitHub Releases, not git.
 aerial/deploy/models/
+
+# Private hover-ceiling analysis — kept locally only, not for public git.
+aerial/docs/phase1-hover-ceiling.md
