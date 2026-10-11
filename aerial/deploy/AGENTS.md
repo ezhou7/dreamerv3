@@ -37,7 +37,8 @@ Two delivery paths coexist:
 | `deploy.sh` | Dev → Pi | rsync code (aerial/, dreamerv3/, embodied/, ninjax/) + one named model bundle to the Orange Pi over SSH. LAN path. | `rsync`, ssh access |
 | `publish_release.sh` | Dev | Tar-gz a bundle, sha256 it, create/refresh a GitHub Release with both assets. Uses `gh api` (works with default `repo` scope) — NOT `gh release create` (needs `workflow` scope). | `gh` authenticated, `tar`, `sha256sum` |
 | `pull_release.sh` | Pi | Download release assets, verify sha256, extract into `aerial/deploy/models/`. Uses `gh` when authenticated, `curl` otherwise. | `gh` OR `curl`, `sha256sum` |
-| `install_orangepi.sh` | Pi | One-shot Python env setup on Orange Pi (apt deps, venv, pip install jax[cpu] + friends). | Debian-based ARM64 Linux, Python 3.11+ |
+| `install_orangepi.sh` | Pi | One-shot Python env setup on Orange Pi. Default installs only `numpy<2` + `ruamel.yaml` (numpy backend); `--jax` adds `jax[cpu]==0.4.38` + ninjax/elements/etc. Never pip-installs `embodied` (repo ships it; PyPI sdist is broken) or the sim stack. | Debian-based ARM64 Linux, Python 3.10+ |
+| `npu/` | Both | JAX-free policy: `extract_weights.py` (agent.pkl → policy_weights.npz), `reference.py` (`NumpyPolicyInference`), `bench.py` (per-backend latency), `jax_agent.py` (agent without PyBullet, dummy bundles). Parity-tested in `aerial/tests/test_npu_reference.py`. Plan: `NPU_PLAN.md`. | numpy (+ JAX for `jax_agent.py`) |
 | `README.md` | — | Human-facing usage instructions. | — |
 | `AGENTS.md` | — | This file. | — |
 
@@ -81,8 +82,8 @@ On the Orange Pi:
 cd ~/aerial-drone
 git pull                                      # picks up code updates
 ./aerial/deploy/pull_release.sh <bundle>      # for the Releases path
-./.venv/bin/python -m aerial.deploy.smoke_test \
-    --model aerial/deploy/models/<bundle>
+./.venv/bin/python -m aerial.deploy.npu.bench \
+    --model aerial/deploy/models/<bundle> --backends numpy
 ```
 
 ### Expected smoke_test.py output
@@ -97,10 +98,12 @@ per-step latency (ms):
   target 20.00 ms (50 Hz)  ->  OK  or TOO SLOW
 ```
 
-**Dev machine reference:** mean ~3 ms, p99 ~9 ms on Ryzen. Orange Pi is
-5-10× slower; expect p99 25-80 ms. If TOO SLOW, options are:
-1. Drop `STEP_RATE_HZ` in `aerial/spec/interface.py` to 25 Hz.
-2. Reimplement the forward pass in pure NumPy (planned; ~500 lines).
+**Measured on the Orange Pi 5** (size12m, 2000 steps,
+`python -m aerial.deploy.npu.bench`; details in `NPU_PLAN.md` Phase 0):
+numpy backend p99 2.5 ms on an A76 core, JAX CPU p99 6.4 ms. Both fit
+the 20 ms budget, but pin the control loop to an A76 core (cpu4-7):
+on an A55 the numpy step is ~11 ms, and unpinned under full CPU load
+p99 hit 19.5 ms / max 29.5 ms.
 
 ---
 
@@ -212,22 +215,25 @@ the command substitution before `if` gets a chance to branch. Use
 `gh api ... || true` and check for empty output instead. Fixed in
 `publish_release.sh` — pattern to follow elsewhere.
 
-### 5. Deterministic-mode eval vs stochastic-mode training
+### 5. `mode='eval'` does NOT make the policy deterministic
 
-`eval_quantitative.py` uses `mode='eval'` (policy distribution mean);
-training rollouts use `mode='train'` (sample). If training rewards
-climb but eval regresses, suspect this divergence — especially at low
-`actent`. Not a `deploy/` concern directly, but the smoke_test also
-uses `mode='eval'` (via inference.py), so it will show the same
-signature.
+`dreamerv3/agent.py:Agent.policy` accepts `mode` but never reads it, so
+`mode='eval'` (eval_quantitative.py, inference.py, smoke_test) still
+*samples* both the RSSM latent and the Gaussian action, exactly like
+training. Same obs + carry → different actions
+(`aerial/tests/test_npu_reference.py::test_eval_mode_is_stochastic`).
+`npu.reference.NumpyPolicyInference(sampling=...)` makes the choice
+explicit: `stochastic` (matches JAX), `mean_action`, `deterministic`.
+Pick for deployment by closed-loop sim eval.
 
 ### 6. PyBullet is imported at env-registration time
 
-`aerial/envs/hover_12in_env.py` triggers a pybullet import even when
-we only want inference. `install_orangepi.sh` currently pip-installs
-pybullet on the Pi as a workaround. Eventual cleanup: gate the pybullet
-import behind an env-registration flag so real hardware can run without
-the sim library.
+`aerial/envs/hover_12in_env.py` triggers a pybullet + gym_pybullet_drones
+import even when we only want inference, so `inference.py` /
+`smoke_test.py` need the sim stack. `install_orangepi.sh` does not
+install it; on the Pi use `aerial/deploy/npu/` (numpy backend, or
+`npu/jax_agent.py`, which builds the agent from the interface spaces
+without `make_env`).
 
 ---
 
@@ -302,9 +308,9 @@ python aerial/deploy/export_model.py \
 # Pull a bundle from GitHub Releases
 ./aerial/deploy/pull_release.sh <bundle-name>
 
-# Smoke test
-./.venv/bin/python -m aerial.deploy.smoke_test \
-  --model aerial/deploy/models/<bundle-name>
+# Latency bench (numpy backend; pin to an A76 core)
+taskset -c 4 ./.venv/bin/python -m aerial.deploy.npu.bench \
+  --model aerial/deploy/models/<bundle-name> --backends numpy
 
 # --- Both ---
 

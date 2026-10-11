@@ -5,8 +5,10 @@ Goal: run the deployed DreamerV3 hover policy on the RK3588 NPU (via
 interface as `aerial/deploy/inference.py:PolicyInference`, without JAX on
 the companion computer.
 
-Status (2026-10-09): **Phase 1 done, Phase 0 done on the dev box —
-waiting on Orange Pi measurements.** Phases 2–7 not started.
+Status (2026-10-11): **Phases 0 and 1 done.** Decision: the numpy CPU
+backend already meets 50 Hz with ~8× headroom on one A76 core, so the
+NPU is an optimization, not a requirement (see Phase 0). Phases 2–7 not
+started.
 
 ---
 
@@ -39,11 +41,14 @@ deter (2048), stoch (32×16 one-hot), previous action (4).
    `aerial/deploy/AGENTS.md` pitfall 5 assumes otherwise. The adapter
    exposes `sampling = stochastic | mean_action | deterministic`; pick by
    closed-loop sim eval (Phase 5), not by assumption.
-2. **The current JAX deploy install is incomplete** — `inference.py`
-   imports the PyBullet env (needs `gym_pybullet_drones`,
-   `pkg_resources`) and `install_orangepi.sh` doesn't install `ninjax`,
-   `einops`, `portal`, `cloudpickle`, `colored_traceback` or `gym_pybullet_drones`. The NumPy/RKNN path
-   needs none of them.
+2. **The old JAX deploy install was broken** — it pip-installed the
+   PyPI `embodied` sdist (fails to build; the repo ships its own) and
+   missed `ninjax`, `einops`, `portal`, `cloudpickle`,
+   `colored_traceback`. Fixed on 2026-10-11: `install_orangepi.sh` now
+   installs the numpy backend by default and the JAX stack with `--jax`
+   (verified on the Pi). `inference.py` / `smoke_test.py` still import
+   the PyBullet env (`gym_pybullet_drones`), which is deliberately not
+   installed on the Pi; the NumPy/RKNN path needs none of it.
 3. **`rknn-toolkit2` (the converter) is Linux-only** (x86_64 / aarch64).
    Conversion runs on the training box or on the Pi, not macOS.
 4. **Multithreaded BLAS wrecks tail latency for batch-1 GEMVs** — on the
@@ -52,7 +57,7 @@ deter (2048), stoch (32×16 one-hot), previous action (4).
 
 ---
 
-## Phase 0 — measure, then decide  ⏳ (dev box done, Pi pending)
+## Phase 0 — measure, then decide  ✅
 
 Tool: `python -m aerial.deploy.npu.bench --model <bundle>`
 
@@ -64,32 +69,51 @@ Dev box (Apple M-series, arm64, numpy 1.26, dummy size12m bundle,
 | numpy reference | 0.83 ms | 0.83 ms | 0.99 ms | 1.16 ms |
 | JAX CPU (current path) | 1.33 ms | 1.29 ms | 1.64 ms | 8.67 ms |
 
-**To do on the Orange Pi 5:**
+Orange Pi 5 (2026-10-11; RK3588, cpu0-3 Cortex-A55 1.8 GHz, cpu4-7
+Cortex-A76 2.4 GHz, `ondemand` governor; Python 3.10.12, numpy 1.26.4,
+jax 0.4.38; dummy size12m bundle, 2000 steps, BLAS 1 thread). Load =
+one shell busy-loop per listed core. Raw JSON:
+`npu/bench_results/2026-10-11-orangepi5/`.
+
+| # | Setup | Backend | mean | p50 | p99 | max |
+|---|---|---|---|---|---|---|
+| 1 | idle, unpinned | numpy | 2.40 | 2.40 | 2.53 | 2.61 |
+| 1 | idle, unpinned | JAX | 6.08 | 6.09 | 6.40 | 8.22 |
+| 2 | idle, pinned A76 (cpu4) | numpy | 2.42 | 2.42 | 2.49 | 2.63 |
+| 3 | idle, pinned A55 (cpu0) | numpy | 11.39 | 11.35 | 11.88 | 13.26 |
+| 4 | load on all 8 cores, unpinned | numpy | 5.54 | 2.78 | **19.50** | **29.49** |
+| 5 | load on 7 cores, pinned to isolated cpu4 | numpy | 3.02 | 3.03 | 3.19 | 3.66 |
+| 5 | load on 7 cores, pinned to isolated cpu4 | JAX | 6.65 | 6.70 | 7.24 | 9.11 |
+
+(ms; budget 20 ms at 50 Hz.) JAX load time 29–54 s vs 0.1 s for numpy.
+SoC temperature reached 84 °C after the load runs — near RK3588's
+throttling point, so the deployed board needs a heatsink + fan.
+
+**Decision.**
+- The numpy backend meets the budget with ~8× headroom (p99 2.5 ms) and
+  is 2.5× faster than the current JAX path. **Ship it as the default
+  deploy backend; the NPU is not needed for latency at size12m.**
+- **Core placement is the real risk**, not compute: an A55 core is 4.7×
+  slower, and unpinned under full contention the max step (29.5 ms)
+  broke the budget. The control loop must run pinned to an isolated
+  A76 core (`taskset -c 4`, later `isolcpus=4` + `SCHED_FIFO`), with
+  MAVLink/telemetry/logging on other cores.
+- Phases 2–5 continue as an optimization: free the A76 cores for the
+  MAVLink bridge + safety layer, headroom for size25m/50m, and NPU CNN
+  encoders if camera observations are added. Re-measure on a trained
+  bundle (shapes are identical, so numbers should carry over).
+
+Reproduce on the Pi:
 
 ```bash
-cd ~/aerial-drone && git pull
-# numpy-only (works with the existing venv):
-./.venv/bin/python -m aerial.deploy.npu.bench \
-    --model aerial/deploy/models/<bundle> --backends numpy \
-    --steps 2000 --json bench-orangepi.json
-# JAX baseline too (needs: pip install ninjax einops portal cloudpickle colored_traceback):
-./.venv/bin/python -m aerial.deploy.npu.bench \
-    --model aerial/deploy/models/<bundle> --steps 2000 \
-    --json bench-orangepi.json
-# No trained bundle on the Pi? Make a dummy one on the dev box:
-python -m aerial.deploy.npu.jax_agent --out aerial/deploy/models/dummy-size12m
+cd ~/Documents/dev/aerial-drone
+./aerial/deploy/install_orangepi.sh            # numpy backend; --jax for JAX
+taskset -c 4 ./.venv/bin/python -m aerial.deploy.npu.bench \
+    --model models/<bundle> --backends numpy --steps 2000 --json bench.json
+# No trained bundle? On the dev box:
+#   python -m aerial.deploy.npu.jax_agent --out aerial/deploy/models/dummy-size12m
+#   REMOTE_ROOT='~/Documents/dev/aerial-drone' ./aerial/deploy/deploy.sh orangepi5 dummy-size12m
 ```
-
-Also run once with `taskset -c 4` (an A76 big core) and once with a
-`stress-ng --cpu 4` load in the background to see tail latency under
-contention.
-
-**Decision gate.** Expect the A76 cores at a few × the dev-box time.
-- numpy p99 ≪ 20 ms on the Pi (likely): the NPU is **not needed for
-  latency**. Its value is offloading the CPU for MAVLink + safety, room
-  for size25m/50m, and future vision encoders. Proceed with Phases 2–5
-  as an optimization, ship the numpy backend first.
-- numpy p99 near/over budget: NPU becomes the critical path.
 
 ## Phase 1 — framework-free reference  ✅
 

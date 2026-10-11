@@ -1,0 +1,35 @@
+{
+  "system": {
+    "host": "orangepi5",
+    "machine": "aarch64",
+    "system": "Linux-5.10.160-rockchip-rk3588-aarch64-with-glibc2.35",
+    "python": "3.10.12",
+    "numpy": "1.26.4",
+    "cpu_count": 8,
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "board": "Orange Pi 5"
+  },
+  "model": "models/dummy-size12m",
+  "budget_ms": 20.0,
+  "backends": {
+    "numpy": {
+      "n": 2000,
+      "mean_ms": 2.4013820455088535,
+      "p50_ms": 2.397166999799083,
+      "p90_ms": 2.429540999901292,
+      "p99_ms": 2.531089570120457,
+      "max_ms": 2.6121209998564154,
+      "load_s": 0.0678719950001323
+    },
+    "jax": {
+      "n": 2000,
+      "mean_ms": 6.081585857994924,
+      "p50_ms": 6.090325499826577,
+      "p90_ms": 6.331675099772838,
+      "p99_ms": 6.401968909885909,
+      "max_ms": 8.221348999995826,
+      "load_s": 28.79336870599991
+    }
+  }
+}
