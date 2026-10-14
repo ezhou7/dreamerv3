@@ -19,7 +19,8 @@ controller yet — that lives in `aerial/hardware/` (Phase 4+).
 | `deploy.sh` | rsync code + a named model bundle to the Orange Pi over SSH. **Same-LAN path.** |
 | `publish_release.sh` | Tar + upload a bundle as a GitHub Release asset. **Cross-network path (dev side).** |
 | `pull_release.sh` | Download + sha256-verify a bundle from a GitHub Release. **Cross-network path (Orange Pi side).** |
-| `install_orangepi.sh` | One-shot Python env setup on the Orange Pi. |
+| `install_orangepi.sh` | One-shot Python env setup on the Orange Pi. Default: numpy backend only; `--jax` adds the JAX stack. |
+| `npu/` | JAX-free NumPy policy (`NumpyPolicyInference`), weight extraction, latency bench. First step of the RK3588 NPU port — see [`NPU_PLAN.md`](NPU_PLAN.md). |
 
 ## Model I/O reference
 
@@ -133,10 +134,11 @@ NumPy (planned follow-up).
 - **No MAVLink bridge.** The Orange Pi can produce actions but nothing
   wires them to ArduPilot yet. See `PLAN.md` Phase 4 SITL and Phase 5
   hardware for the wiring plan.
-- **PyBullet on the Orange Pi.** `install_orangepi.sh` pip-installs
-  pybullet because `aerial/envs/hover_12in_env.py` triggers the import
-  at env-registration time. Trim this later — Orange Pi should not
-  need any sim library.
+- **`smoke_test.py` / `inference.py` don't run on the Pi.** They import
+  `aerial/envs/hover_12in_env.py`, which needs pybullet +
+  gym_pybullet_drones; `install_orangepi.sh` no longer installs the sim
+  stack. On the Pi use the `npu/` path instead
+  (`python -m aerial.deploy.npu.bench --model models/<name>`).
 - **No safety limits.** For tethered flight, wrap `policy.step()` in a
   clamp (max body rate 3 rad/s, thrust ceiling 0.5, watchdog on
   step-rate slippage). Don't fly with raw policy output.
