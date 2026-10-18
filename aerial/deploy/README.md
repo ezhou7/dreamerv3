@@ -20,7 +20,8 @@ controller yet — that lives in `aerial/hardware/` (Phase 4+).
 | `publish_release.sh` | Tar + upload a bundle as a GitHub Release asset. **Cross-network path (dev side).** |
 | `pull_release.sh` | Download + sha256-verify a bundle from a GitHub Release. **Cross-network path (Orange Pi side).** |
 | `install_orangepi.sh` | One-shot Python env setup on the Orange Pi. Default: numpy backend only; `--jax` adds the JAX stack. |
-| `npu/` | JAX-free NumPy policy (`NumpyPolicyInference`), weight extraction, latency bench. First step of the RK3588 NPU port — see [`NPU_PLAN.md`](NPU_PLAN.md). |
+| `npu/` | JAX-free NumPy policy (`NumpyPolicyInference`), weight extraction, latency bench, and the RK3588 NPU backend (`export_onnx.py` → `convert_rknn.py` → `rknn_policy.RKNNPolicyInference`). How to run on the NPU: [`NPU_PLAN.md`](NPU_PLAN.md#running-on-the-npu-phases-24). |
+| `npu/run_policy.py` | Print a bundle's actions in the terminal: `--mode probe` (hand-built states) or `--mode sim` (closed loop in a numpy model of the F450 env: `airframe_12in`, `ArduPilotRateController`). `--backend numpy\|rknn`. |
 
 ## Model I/O reference
 

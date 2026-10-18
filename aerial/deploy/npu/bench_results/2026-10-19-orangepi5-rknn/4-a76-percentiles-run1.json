@@ -1,0 +1,37 @@
+{
+  "system": {
+    "host": "orangepi5",
+    "machine": "aarch64",
+    "system": "Linux-5.10.160-rockchip-rk3588-aarch64-with-glibc2.35",
+    "python": "3.10.12",
+    "numpy": "1.26.4",
+    "cpu_count": 8,
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "board": "Orange Pi 5"
+  },
+  "model": "aerial/deploy/models/skydreamer-f450-4.4m-1c-2026-10-17",
+  "budget_ms": 20.0,
+  "backends": {
+    "numpy": {
+      "n": 5000,
+      "mean_ms": 2.568975957802377,
+      "p50_ms": 2.447043000302074,
+      "p75_ms": 2.514198750191099,
+      "p90_ms": 2.608682299978682,
+      "p99_ms": 5.43007416971705,
+      "max_ms": 6.098941999880481,
+      "load_s": 0.06955845199991018
+    },
+    "rknn": {
+      "n": 5000,
+      "mean_ms": 6.351735896800983,
+      "p50_ms": 6.068985000183602,
+      "p75_ms": 7.035541749701224,
+      "p90_ms": 8.12135930000295,
+      "p99_ms": 9.918890319872851,
+      "max_ms": 24.497559999872465,
+      "load_s": 0.2954724860001079
+    }
+  }
+}

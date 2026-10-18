@@ -5,10 +5,11 @@ Goal: run the deployed DreamerV3 hover policy on the RK3588 NPU (via
 interface as `aerial/deploy/inference.py:PolicyInference`, without JAX on
 the companion computer.
 
-Status (2026-10-11): **Phases 0 and 1 done.** Decision: the numpy CPU
-backend already meets 50 Hz with ~8× headroom on one A76 core, so the
-NPU is an optimization, not a requirement (see Phase 0). Phases 2–7 not
-started.
+Status (2026-10-19): **Phases 0–4 done; the policy runs on the NPU**
+(trained bundle `skydreamer-f450-4.4m-1c-2026-10-17`). Decision unchanged:
+the numpy CPU backend stays the default. At batch 1 the NPU is
+dispatch-bound and *slower* than numpy on an A76 core (see Phase 4
+results). Phases 5–7 not started.
 
 ---
 
@@ -146,40 +147,100 @@ the parity suite pointed at it (or `bench` with both backends).
 
 ---
 
-## Phase 2 — ONNX graphs shaped for the NPU
+## Running on the NPU (Phases 2–4)  ✅
 
-- Two static-shape graphs, batch 1, opset 13–17:
-  - **core**: (obs_symlog 22, deter 2048, stoch 512, prevact_norm 4) →
-    (deter′ 2048, logits 512)
-  - **actor**: (deter′ 2048, stoch′ 512) → (mean 4, std 4)
-- CPU glue stays in numpy: symlog, reset masking, action normalization,
-  unimix + sampling. (Optional later: single graph with noise passed in
-  as inputs — Gumbel-max latent, `mean + std·ε` — saves one NPU call but
-  needs ArgMax/Equal support.)
-- BlockLinear → grouped 1×1 `Conv` (`group=8`) — the NPU's best-
-  optimized path. Fallback: batched `MatMul` (8,1,1024)@(8,1024,256).
-  Never a block-diagonal dense matrix (8× the weights).
-- Build via a small PyTorch module loading `policy_weights.npz`, then
-  `torch.onnx.export`. Validate ONNX Runtime output against
-  `ReferencePolicy` (same harness as Phase 1, ≤1e-5).
+```bash
+./aerial/deploy/install_orangepi.sh --npu   # toolkit + lite 2.3.2, .venv/rknnrt/librknnrt.so
+export LIBRKNNRT_PATH=$PWD/.venv/rknnrt/librknnrt.so PYTHONPATH=$PWD
+M=aerial/deploy/models/<bundle>
+./aerial/deploy/pull_release.sh <bundle>
+.venv/bin/python -m aerial.deploy.npu.extract_weights --model $M  # policy_weights.npz
+.venv/bin/python -m aerial.deploy.npu.export_onnx --model $M      # core/actor.onnx + ORT parity
+.venv/bin/python -m aerial.deploy.npu.convert_rknn --model $M     # core/actor.rknn (fp16)
+.venv/bin/python -m aerial.deploy.npu.rknn_policy --model $M      # NPU vs reference check
+taskset -c 4 .venv/bin/python -m aerial.deploy.npu.bench --model $M --backends rknn,numpy
+.venv/bin/python -m aerial.deploy.npu.run_policy --model $M --mode sim --backend rknn
+```
 
-## Phase 3 — RKNN conversion (Linux host)
+| File | Purpose |
+|---|---|
+| `npu/export_onnx.py` | Phase 2. `policy_weights.npz` → `core.onnx` (obs_symlog, deter, stoch, normalized prevact → deter′, logits) and `actor.onnx` (deter′, stoch′ → mean, std), built with `onnx.helper` (no torch). BlockLinear = batched MatMul (G,1,i)@(G,i,o). Checks against `ReferencePolicy` with onnxruntime (max err 1.6e-5). |
+| `npu/convert_rknn.py` | Phase 3. ONNX → `.rknn`, `target_platform=rk3588`, fp16, no quantization; writes `rknn_manifest.json` (toolkit version + sha256s). |
+| `npu/rknn_policy.py` | Phase 4. `RKNNPolicyInference` (`RKNNLite`, `NPU_CORE_0`), same API and `sampling` modes (default `mean_action`) as `NumpyPolicyInference`; `python -m` runs the step-level + drift check. `bench.py --backends rknn`. |
+| `npu/run_policy.py` | Prints a bundle's actions in the terminal. `--mode probe`: hand-built states. `--mode sim`: closed loop in a NumPy rigid-body model using `airframe_12in`, `ArduPilotRateController` (400 Hz) and the Stage 1c init/latency ranges. `--backend numpy\|rknn`. |
+| `tests/test_npu_onnx.py` | ONNX graphs vs `ReferencePolicy` on small random weights (no JAX). |
+| `tests/test_run_policy_sim.py` | Sim sign checks: hover trim, +pitch = nose-down (→ +x), +roll = right bank (→ −y). |
 
-- `rknn.config(target_platform='rk3588')`, `do_quantization=False`
-  (**fp16 first**).
-- `rknn.accuracy_analysis` per layer vs ONNX; watch RMSNorm reductions
-  (mean of squares over 2048) and GRU gates in fp16.
-- Pin the toolkit version; record it in the bundle manifest. The Pi's
-  `librknnrt.so` must match.
+**Runtime version.** The board image ships `/usr/lib/librknnrt.so`
+2.0.0b0 (kernel driver 0.8.8); the oldest aarch64 `rknn-toolkit2`
+wheel is 2.3.0, so models are built with 2.3.2 and loaded with a 2.3.2
+`librknnrt.so` from airockchip. rknnlite hardcodes the `/usr/lib` path
+(and ignores `LD_PRELOAD`); `rknn_policy.py` overrides it when
+`LIBRKNNRT_PATH` is set. The 2.0.0b0 runtime also runs the models, with a
+version-mismatch warning.
 
-## Phase 4 — runtime adapter on the Pi
+**Graph shaping.** `Reciprocal` and `Tile` are placed on the CPU by
+RKNN (as `Div` / `Expand`), splitting the graph; the exporter uses
+`Div(x, Sqrt(·))` and a `Concat` of G copies instead, so every compute
+op runs on the NPU. Per-op profile: `RKNN_LOG_LEVEL=4`.
 
-- `npu/rknn_policy.py`: `RKNNPolicy` (`RKNNLite`, `core_mask=NPU_CORE_0`),
-  carry in preallocated numpy buffers, same sampling modes and API.
-- `make_policy(model_dir, backend='numpy'|'onnx'|'rknn'|'jax', sampling=…)`;
-  `smoke_test.py --backend`.
-- `install_orangepi_npu.sh`: numpy, ruamel.yaml, `rknn-toolkit-lite2`
-  (cp312 aarch64 wheel); check `/sys/kernel/debug/rknpu/version`.
+**Accuracy** (trained bundle, fp16, deterministic sampling, 3000
+steps of random obs): step-level max error deter 4.7e-3, logits 5.4e-2,
+action mean 2.0e-3, std 2.3e-3. Closed-loop deterministic trajectories
+diverge (deter Δ ≈ 1, ~2% latent flips), but the fp32 reference diverges
+identically from itself under 1e-5 injected deter noise, so this is the
+trajectory's sensitivity to tiny perturbations, not an fp16 defect.
+The real gate is still closed-loop sim eval (Phase 5).
+
+**Closed loop** (`run_policy.py --mode sim`, `mean_action`, 30 random
+Stage 1c starts, 8 s, no wind/noise/DR): **30/30 on numpy and 30/30 on
+rknn**, no crashes, median final error 0.13 / 0.12 m. Not a substitute
+for the PyBullet eval (PR #7: 29/30), but it shows the NPU policy flies
+the same as the CPU one. The policy depends on the FC's rate-setpoint
+slew (19.2 rad/s² roll/pitch): without it, a first-order rate model
+over-rotated and crashed.
+
+**Latency** (Orange Pi 5, 2026-10-19, 2000 steps, stochastic sampling,
+ms; raw JSON: `npu/bench_results/2026-10-19-orangepi5-rknn/`):
+
+| Setup (Python thread pinned to) | Backend | mean | p50 | p99 | max |
+|---|---|---|---|---|---|
+| idle, A76 (cpu4) | rknn | 6.04 | 5.83 | 9.25 | 23.21 |
+| idle, A76 (cpu4) | numpy | 2.62 | 2.49 | 5.41 | 6.93 |
+| idle, A55 (cpu0) | rknn | 6.68 | 6.53 | 8.61 | 46.00 |
+| idle, A55 (cpu0) | numpy | 12.47 | 11.72 | 17.02 | 23.70 |
+| load on 7 cores, cpu4 | rknn | 5.56 | 4.72 | 19.60 | 30.91 |
+| load on 7 cores, cpu4 | numpy | 3.81 | 3.54 | 6.28 | 9.45 |
+
+Percentiles, idle, pinned to cpu4, 3 runs × 5000 steps (ranges over
+runs; `4-a76-percentiles-run*.json`):
+
+| Backend | p50 | p75 | p90 | p99 | max |
+|---|---|---|---|---|---|
+| numpy | 2.45–2.46 | 2.51–2.53 | 2.61 | 5.30–5.43 | 6.1–6.4 |
+| rknn | 5.82–6.07 | 6.60–7.04 | 7.51–8.12 | 9.09–10.38 | 24.2–27.6 |
+
+`core` ≈ 4.4 ms, `actor` ≈ 0.95 ms per call. Each of the ~87 core ops
+costs a near-fixed ~50–70 µs of NPU dispatch, whatever its size, so the
+graph is overhead-bound, not compute-bound. The NPU path's tail latency
+(max 23–46 ms) breaks the 20 ms budget; numpy's does not. The NPU only
+wins when the policy has to run on an A55 core.
+
+Next levers, if the NPU is still wanted: fewer ops (one fused graph
+with noise as inputs, see below; fold reshapes), RKNN multi-core / async
+mode, `performance` NPU devfreq governor, and larger presets or CNN
+encoders where per-op work outweighs dispatch.
+
+Original Phase 2–4 design notes:
+
+- Two static-shape graphs, batch 1. CPU glue stays in numpy: symlog,
+  reset masking, action normalization, unimix + sampling. (Optional later:
+  single graph with noise passed in as inputs — Gumbel-max latent,
+  `mean + std·ε` — saves one NPU call but needs ArgMax/Equal support.)
+- BlockLinear alternative: grouped 1×1 `Conv` (`group=8`). Never a
+  block-diagonal dense matrix (8× the weights).
+- `rknn.accuracy_analysis` per layer vs ONNX if fp16 error grows
+  (RMSNorm over 2048, GRU gates).
 
 ## Phase 5 — validation gate
 
