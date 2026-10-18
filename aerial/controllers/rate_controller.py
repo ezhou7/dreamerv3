@@ -26,11 +26,12 @@ DSLPIDControl (which matches PyBullet's cf2x URDF prop positions):
 
   Note the sign conventions: +roll torque lifts the +y (left) side;
   +pitch torque lifts the back (nose down); +yaw torque spins CCW
-  about world-z. The policy spec uses standard FPV (+roll = right
-  bank, +pitch = nose up, +yaw = CCW) and the rate axis order matches
-  PyBullet's gyro output, so the spec layer just hands rate setpoints
-  through to this controller without sign flips — the mixer absorbs
-  the convention difference.
+  about world-z. Rates follow the right-hand rule about the body axes
+  (x fwd, y left, z up), the same as PyBullet's gyro output: +roll =
+  right bank, +pitch = nose DOWN, +yaw = CCW. The spec layer hands
+  rate setpoints through to this controller without sign flips.
+  (This is not the FRD convention ArduPilot uses, where +pitch is nose
+  up; the MAVLink bridge must convert.)
 """
 import numpy as np
 
