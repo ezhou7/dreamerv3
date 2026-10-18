@@ -1,18 +1,25 @@
-"""Gymnasium env for the 12" airframe with full domain randomization.
+"""Gymnasium env for the target airframe with full domain randomization.
 
-Phase 1 production env. Reuses everything from Phase 0
-(aerial/spec/, aerial/controllers/, PyBullet BaseAviary) but swaps the
-Crazyflie URDF for the 12" quad URDF (aerial/assets/cf12in.urdf) and
-applies per-episode + per-step domain randomization.
+Phase 1 production env. Reuses aerial/spec/ and PyBullet BaseAviary but
+swaps the Crazyflie URDF for aerial/assets/cf12in.urdf and applies
+per-episode + per-step domain randomization. The "12in" names are
+historical: since 2026-10-17 the airframe is the project's F450 (10"
+props), see aerial/configs/airframe_12in.py.
 
 Registered as Gymnasium env `Aerial-hover-12in-v0`.
 
-Differences from hover_pybullet_env.py:
-  * 12" airframe (0.8 kg, 0.15m arm) instead of Crazyflie (30g, 40mm)
-  * Full domain randomization from configs/domain_randomization.py
-  * Wider init randomization (±2m xy, ±1m z, ±30° rpy)
-  * Larger workspace bounds
-  * Sharpened reward already lives in aerial/spec/reward.py (shared)
+Simulation loop (since 2026-10-16). The policy acts at STEP_RATE_HZ;
+everything below it runs every physics substep at PYB_FREQ, the default
+ArduPilot Copter loop rate:
+  * ArduPilot-style rate controller (aerial/controllers/rate_controller.py)
+    reads a biased, noisy body-frame gyro.
+  * First-order motor lag, per-motor thrust scale, armed idle floor.
+  * Rotor drag + ground effect (gym-pybullet-drones PYB_GND_DRAG_DW).
+  * Mean wind + gusts applied at the center of mass; CG-offset torque.
+  * Action latency and observation latency at substep resolution.
+The policy observes a delayed state with estimator errors: attitude
+bias/noise, gyro bias/noise, drifting position/velocity error. Reward
+and termination use the true state.
 
 URDF loading gotcha:
   gym-pybullet-drones hardcodes URDF path via pkg_resources against its
@@ -23,6 +30,7 @@ URDF loading gotcha:
 """
 import os
 import shutil
+from collections import deque
 
 import numpy as np
 import gymnasium as gym
@@ -30,6 +38,7 @@ from gymnasium.envs.registration import register
 from gymnasium.spaces import Box, Dict as DictSpace
 
 import pkg_resources
+import pybullet as p
 from gym_pybullet_drones.envs.BaseAviary import BaseAviary
 from gym_pybullet_drones.utils.enums import Physics
 
@@ -40,13 +49,15 @@ from aerial.spec.interface import (
 from aerial.spec.reward import (
     RewardState, step_reward, CRASH_PENALTY, is_unstable,
 )
-from aerial.controllers.rate_controller import BodyRateController, DEFAULT_KP
+from aerial.controllers.rate_controller import (
+    ArduPilotRateController, MIXER,
+)
 from aerial.configs.airframe_12in import DEFAULT_12IN
 from aerial.configs.domain_randomization import (
+    GUST_AXIS_SCALE,
     get_stage as get_dr_stage,
     sample_episode_params,
     sample_init_pose,
-    add_sensor_noise,
 )
 
 # --- URDF install at import time ---------------------------------------
@@ -77,16 +88,28 @@ class _DroneModel12in:
 CF12IN = _DroneModel12in()
 
 # --- Timing ------------------------------------------------------------
-PYB_FREQ = 250
-PYB_STEPS_PER_CTRL = PYB_FREQ // STEP_RATE_HZ
+PYB_FREQ = 400
+SUBSTEPS = PYB_FREQ // STEP_RATE_HZ
+PHYS_DT = 1.0 / PYB_FREQ
+CTRL_DT = 1.0 / STEP_RATE_HZ
 assert PYB_FREQ % STEP_RATE_HZ == 0
+# Delayed-state buffer, in physics substeps (covers up to ~77 ms).
+HISTORY_LEN = 32
+# center_of_mass_link in cf12in.urdf. gym-pybullet-drones applies body
+# torques here because LINK_FRAME torques on the base (-1) are unreliable.
+COM_LINK = 4
 
 # --- Workspace / termination ------------------------------------------
 # 12" quad flies faster + we spawn it up to 2m from target, so bounds
 # need to be wider than Phase 0's cramped Crazyflie workspace.
 BOUND_XY = 10.0
-BOUND_Z_MIN = 0.05
 BOUND_Z_MAX = 8.0
+# Before 2026-10-16 the floor bound sat below the resting height, so
+# sitting on the ground never ended an episode and the floor worked as a
+# safety net. Now any ground contact, or dropping to within 10 cm of
+# touching down (the F450 stands at z = 0.155 m on its legs), is an
+# immediate crash.
+GROUND_CRASH_ALTITUDE_M = DEFAULT_12IN.rest_height_m + 0.10
 
 EPISODE_STEPS = 500          # 10s at 50 Hz
 UNSTABLE_WINDOW = 10         # consecutive unstable steps before crash
@@ -94,7 +117,13 @@ OOB_WINDOW = 5               # consecutive OOB steps before crash
 
 
 class _HoverAviary12in(BaseAviary):
-    """BaseAviary subclass loading the 12" URDF instead of cf2x."""
+    """BaseAviary subclass loading the 12" URDF instead of cf2x.
+
+    One sim.step() is one physics substep (ctrl_freq == pyb_freq); the
+    env runs the flight controller between substeps. The action is the
+    per-motor thrust as a fraction of nominal max thrust; it may exceed
+    1 for stronger-than-nominal motors.
+    """
 
     ACTION_BUFFER_SIZE = 1
 
@@ -104,27 +133,26 @@ class _HoverAviary12in(BaseAviary):
             num_drones=1,
             initial_xyzs=initial_xyzs,
             initial_rpys=initial_rpys,
-            physics=Physics.PYB,
+            physics=Physics.PYB_GND_DRAG_DW,
             pyb_freq=PYB_FREQ,
-            ctrl_freq=STEP_RATE_HZ,
+            ctrl_freq=PYB_FREQ,
             gui=gui,
             record=False,
             user_debug_gui=False,
         )
 
     def _actionSpace(self):
-        return Box(low=0.0, high=1.0, shape=(1, 4), dtype=np.float32)
+        return Box(low=0.0, high=np.inf, shape=(1, 4), dtype=np.float32)
 
     def _observationSpace(self):
         return Box(low=-np.inf, high=np.inf, shape=(20,), dtype=np.float32)
 
     def _computeObs(self):
-        return self._getDroneStateVector(0)
+        return None
 
     def _preprocessAction(self, action):
-        cmd = np.clip(np.asarray(action), 0.0, 1.0).reshape(1, 4)
-        rpm = np.sqrt(cmd) * self.MAX_RPM
-        return rpm
+        thrust_frac = np.maximum(np.asarray(action), 0.0).reshape(1, 4)
+        return np.sqrt(thrust_frac) * self.MAX_RPM
 
     def _computeReward(self):
         return 0.0
@@ -144,7 +172,7 @@ class Hover12inEnv(gym.Env):
 
     Action:  policy body-rate + collective thrust in [-1, 1]^4
     Obs:     Dict{'vector': float32[22]}  (position-relative, sim-agnostic)
-    Reward:  aerial/spec/reward.py (sharpened for Phase 1)
+    Reward:  aerial/spec/reward.py
     """
 
     metadata = {"render_modes": ["human"]}
@@ -168,18 +196,15 @@ class Hover12inEnv(gym.Env):
         })
 
         self._sim = None
-        self._controller = BodyRateController()
+        self._nominal_drag = None
+        self._fc = None
         self._reward_state = RewardState.initial(action_dim=ACTION_DIM)
         self._elapsed = 0
         self._last_action = np.zeros(ACTION_DIM, dtype=np.float32)
         self._unstable_window = []
         self._oob_window = []
         self._rng = np.random.default_rng()
-        # Per-episode randomization state.
         self._episode_params = None
-        # Per-step control latency buffer (holds the raw action received
-        # `latency_steps` calls ago; released to physics this step).
-        self._action_buffer = []
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -191,100 +216,107 @@ class Hover12inEnv(gym.Env):
         self._oob_window.clear()
         self._last_action = np.zeros(ACTION_DIM, dtype=np.float32)
         self._reward_state = RewardState.initial(action_dim=ACTION_DIM)
-        self._controller.reset()
 
-        # 1. Draw episode-wide randomization: mass/motor/rate-gain/etc.
-        self._episode_params = sample_episode_params(self._rng, self._dr_ranges)
+        # 1. Episode-wide randomization.
+        ep = self._episode_params = sample_episode_params(
+            self._rng, self._dr_ranges)
+        r = self._dr_ranges
 
-        # 2. Apply rate-controller gain jitter.
-        self._controller.kp = (
-            DEFAULT_KP.copy() * self._episode_params["rate_kp_scale"]
-        )
+        # 2. Flight controller tuned for the nominal airframe; gain_scale
+        #    models the tuning mismatch with the actual vehicle.
+        self._fc = ArduPilotRateController(
+            DEFAULT_12IN, PYB_FREQ, gain_scale=ep["rate_kp_scale"])
+        motor_tau = DEFAULT_12IN.motor_time_constant_s * ep["motor_tau_scale"]
+        self._motor_alpha = 1.0 - np.exp(-PHYS_DT / motor_tau)
 
-        # 3. Compute how many control steps of latency this episode.
-        latency_steps = int(round(
-            self._episode_params["control_latency_s"] * STEP_RATE_HZ
-        ))
-        self._action_buffer = [
-            np.zeros(ACTION_DIM, dtype=np.float32)
-            for _ in range(latency_steps)
-        ]
+        # 3. Latency: actions are queued with a release time; observations
+        #    are read from a delayed-state buffer.
+        self._t = 0.0
+        self._pending = deque()
+        self._applied = np.zeros(ACTION_DIM, dtype=np.float32)
+        self._obs_delay_steps = int(round(ep["obs_latency_s"] * PYB_FREQ))
 
-        # 4. Sample init pose (wide: ±2m xy, ±1m z, ±30° rpy).
+        # 4. Slow random processes start from their stationary spread.
+        self._gust_sigma = r.gust_force_sigma_N * GUST_AXIS_SCALE
+        self._gust = self._rng.normal(0.0, self._gust_sigma)
+        self._pos_drift = self._rng.normal(0.0, r.pos_drift_sigma_m, 3)
+        self._vel_drift = self._rng.normal(0.0, r.vel_drift_sigma_m_s, 3)
+
+        # 5. Sample init pose (wide: ±2m xy, ±1m z, ±30° rpy).
         init_pos, init_rpy_rad = sample_init_pose(
             self._rng, TARGET_POSITION, self._dr_ranges)
 
-        # 5. Create or repose the sim.
+        # 6. Create or repose the sim.
+        if self._sim is not None and not self._gui:
+            self._sim.close()
+            self._sim = None
         if self._sim is None:
             self._sim = _HoverAviary12in(
                 initial_xyzs=init_pos.reshape(1, 3),
                 initial_rpys=init_rpy_rad.reshape(1, 3),
                 gui=self._gui,
             )
+            self._nominal_drag = self._sim.DRAG_COEFF.copy()
         else:
-            if not self._gui:
-                self._sim.close()
-                self._sim = _HoverAviary12in(
-                    initial_xyzs=init_pos.reshape(1, 3),
-                    initial_rpys=init_rpy_rad.reshape(1, 3),
-                    gui=self._gui,
-                )
-            else:
-                self._sim.INIT_XYZS = init_pos.reshape(1, 3)
-                self._sim.INIT_RPYS = init_rpy_rad.reshape(1, 3)
+            self._sim.INIT_XYZS = init_pos.reshape(1, 3)
+            self._sim.INIT_RPYS = init_rpy_rad.reshape(1, 3)
         self._sim.reset()
 
-        # 6. Apply per-episode mass/inertia scaling to the drone body.
+        # 7. Body + aero randomization.
         self._apply_body_randomization()
 
-        obs_vec, _, _ = self._build_obs_and_done(self._last_action)
+        # 8. Motors start at the thrust that holds this vehicle's weight
+        #    (the drone is handed over in flight).
+        mass = DEFAULT_12IN.mass_kg * ep["mass_scale"]
+        hover = mass * 9.81 / (
+            4.0 * DEFAULT_12IN.max_thrust_per_motor_N
+            * float(np.mean(ep["motor_scales"])))
+        self._motor = np.full(
+            4, np.clip(hover, ArduPilotRateController.MIN_MOTOR, 1.0),
+            dtype=np.float32)
+        # ArduPilot keeps rate I-terms across mode changes, so at handover
+        # the FC has already trimmed out CG offset and motor imbalance.
+        self._fc.integ = self._hover_trim(hover)
+
+        self._history = deque(maxlen=HISTORY_LEN)
+        self._history.append(self._snapshot())
+        obs_vec, _ = self._observe(self._last_action)
         return {"vector": obs_vec}, {}
 
     def step(self, action):
         raw = np.asarray(action, dtype=np.float32).reshape(ACTION_DIM)
+        ep = self._episode_params
+        r = self._dr_ranges
+        self._pending.append((self._t + ep["control_latency_s"], raw))
 
-        # Latency: policy action goes into buffer, physics reads the
-        # `latency`-old action off the buffer.
-        if self._action_buffer:
-            self._action_buffer.append(raw.copy())
-            applied = self._action_buffer.pop(0)
-        else:
-            applied = raw
-
-        body_rates, thrust_norm = scale_action(applied)
-
-        # Motor thrust scaling: reduce effective thrust command by the
-        # episode's thrust_scale so the policy has to compensate for
-        # weak/strong motors.
-        thrust_norm = float(np.clip(
-            thrust_norm * self._episode_params["motor_thrust_scale"],
-            0.0, 1.0,
-        ))
-
-        # Rate loop reads the (noisy) gyro from the sim.
-        state = self._sim._getDroneStateVector(0)
-        gyro_true = state[13:16]
-        # Noisy gyro for rate loop (mimics real IMU that the FC would see).
-        gyro_noisy = gyro_true + self._rng.normal(
-            0.0, self._dr_ranges.gyro_noise_sigma_rad_s, size=3
-        ).astype(gyro_true.dtype)
-
-        dt = 1.0 / STEP_RATE_HZ
-        motor_cmd = self._controller.step(body_rates, gyro_noisy,
-                                          thrust_norm, dt)
-        self._sim.step(motor_cmd.reshape(1, 4))
-
-        # Apply constant per-episode wind gust as an external force on
-        # base_link (in world frame).
-        self._apply_wind()
+        min_z = np.inf
+        for _ in range(SUBSTEPS):
+            while self._pending and self._pending[0][0] <= self._t + 1e-9:
+                self._applied = self._pending.popleft()[1]
+            body_rates, thrust_norm = scale_action(self._applied)
+            gyro_meas = (self._body_gyro() + ep["gyro_bias"]
+                         + self._rng.normal(0.0, r.gyro_noise_sigma_rad_s, 3))
+            cmd = self._fc.step(body_rates, gyro_meas, thrust_norm)
+            self._motor += self._motor_alpha * (cmd - self._motor)
+            thrust_frac = self._motor * ep["motor_scales"]
+            self._apply_disturbances(thrust_frac)
+            self._sim.step(thrust_frac.reshape(1, 4))
+            self._t += PHYS_DT
+            self._history.append(self._snapshot())
+            min_z = min(min_z, float(self._sim.pos[0][2]))
+        self._advance_slow_processes()
 
         self._elapsed += 1
-        obs_vec, terminated, truncated = self._build_obs_and_done(raw)
+        obs_vec, obs_gyro = self._observe(raw)
+        terminated, truncated = self._check_done(obs_gyro, min_z)
+
+        R = _quat_to_R(self._sim.quat[0])
         reward, info = step_reward(
-            pos_err=obs_vec[0:3],
-            vel=obs_vec[3:6],
-            gyro=obs_vec[15:18],
-            up_axis=upright_from_R(obs_vec[6:15].reshape(3, 3)),
+            pos_err=self._sim.pos[0] - TARGET_POSITION,
+            vel=self._sim.vel[0],
+            gyro=R.T @ self._sim.ang_v[0],
+            up_axis=upright_from_R(R),
+            altitude=self._sim.pos[0][2],
             action=raw,
             state=self._reward_state,
         )
@@ -305,74 +337,124 @@ class Hover12inEnv(gym.Env):
 
     # --- Randomization helpers -----------------------------------------
     def _apply_body_randomization(self):
-        """Scale drone mass + inertia by the per-episode multipliers.
-
-        PyBullet exposes mass/inertia via changeDynamics on the base link.
-        """
-        import pybullet as p
-        drone_id = int(self._sim.DRONE_IDS[0])
-        client = self._sim.CLIENT
-
-        base_mass = DEFAULT_12IN.mass_kg * self._episode_params["mass_scale"]
-        inertia = (DEFAULT_12IN.inertia_diag_kg_m2
-                   * self._episode_params["inertia_scale"])
+        """Scale mass, inertia and drag by the per-episode multipliers."""
+        ep = self._episode_params
+        base_mass = DEFAULT_12IN.mass_kg * ep["mass_scale"]
+        inertia = DEFAULT_12IN.inertia_diag_kg_m2 * ep["inertia_scale"]
         p.changeDynamics(
-            drone_id, -1,
+            int(self._sim.DRONE_IDS[0]), -1,
             mass=float(base_mass),
             localInertiaDiagonal=inertia.tolist(),
-            physicsClientId=client,
+            physicsClientId=self._sim.CLIENT,
         )
-        # Note: motor_tau randomization is only meaningful if the sim
-        # uses a first-order motor model. gym-pybullet-drones' default
-        # PYB physics applies instantaneous thrust, so motor_tau is
-        # currently a no-op. Kept in the DR spec for when we swap to
-        # Physics.DYN or a custom motor model.
+        self._sim.DRAG_COEFF = self._nominal_drag * ep["drag_scale"]
 
-    def _apply_wind(self):
-        """Apply constant wind gust force to the drone body (world frame)."""
-        wind = self._episode_params.get("wind_force_world")
-        if wind is None or float(np.linalg.norm(wind)) < 1e-6:
-            return
-        import pybullet as p
+    def _apply_disturbances(self, thrust_frac):
+        """Wind + gust at the center of mass, and the CG-offset torque.
+
+        PyBullet clears external forces after every stepSimulation, so
+        this runs before each substep. In WORLD_FRAME, posObj is a world
+        position: it must be the drone's position, or the force also
+        applies a torque about the world origin.
+        """
+        ep = self._episode_params
         drone_id = int(self._sim.DRONE_IDS[0])
+        force = ep["wind_force_world"] + self._gust
         p.applyExternalForce(
-            objectUniqueId=drone_id,
-            linkIndex=-1,
-            forceObj=wind.tolist(),
-            posObj=[0, 0, 0],
+            drone_id, -1,
+            forceObj=force.tolist(),
+            posObj=self._sim.pos[0].tolist(),
             flags=p.WORLD_FRAME,
             physicsClientId=self._sim.CLIENT,
         )
+        # Thrust acts at the geometric center; with the CG displaced by
+        # (rx, ry) that adds torque -(r x F) about the CG, body frame.
+        total_thrust = (float(thrust_frac.sum())
+                        * DEFAULT_12IN.max_thrust_per_motor_N)
+        rx, ry = ep["cg_offset_m"]
+        p.applyExternalTorque(
+            drone_id, COM_LINK,
+            torqueObj=[-ry * total_thrust, rx * total_thrust, 0.0],
+            flags=p.LINK_FRAME,
+            physicsClientId=self._sim.CLIENT,
+        )
+
+    def _hover_trim(self, collective):
+        """Mixer input that zeroes body torque at hover for this vehicle.
+
+        Solves A·diag(s)·(c + M·tau)·T_max + tau_cg = 0 for tau, where A
+        maps per-motor thrust to body torque and s are the motor scales.
+        """
+        ep = self._episode_params
+        a = DEFAULT_12IN.arm_length_m / np.sqrt(2.0)
+        x = np.array([a, -a, -a, a])
+        y = np.array([-a, -a, a, a])
+        spin = np.array([-1.0, 1.0, -1.0, 1.0])
+        A = np.stack([y, -x, DEFAULT_12IN.torque_coeff_per_thrust * spin])
+        s = np.asarray(ep["motor_scales"], dtype=np.float64)
+        t_max = DEFAULT_12IN.max_thrust_per_motor_N
+        rx, ry = ep["cg_offset_m"]
+        weight = DEFAULT_12IN.mass_kg * ep["mass_scale"] * 9.81
+        tau_cg = np.array([-ry * weight, rx * weight, 0.0])
+        lhs = t_max * A @ np.diag(s) @ MIXER
+        rhs = -(t_max * collective * A @ s + tau_cg)
+        tau = np.linalg.solve(lhs, rhs)
+        return np.clip(tau, -ArduPilotRateController.I_MAX,
+                       ArduPilotRateController.I_MAX).astype(np.float32)
+
+    def _advance_slow_processes(self):
+        """Gusts and estimator drift: Ornstein-Uhlenbeck, per control step."""
+        r = self._dr_ranges
+        self._gust = self._ou(self._gust, self._gust_sigma, r.gust_tau_s)
+        self._pos_drift = self._ou(
+            self._pos_drift, r.pos_drift_sigma_m, r.pos_drift_tau_s)
+        self._vel_drift = self._ou(
+            self._vel_drift, r.vel_drift_sigma_m_s, r.vel_drift_tau_s)
+
+    def _ou(self, x, sigma, tau):
+        a = np.exp(-CTRL_DT / tau)
+        return a * x + sigma * np.sqrt(1.0 - a * a) * self._rng.normal(size=3)
+
+    # --- State access ---------------------------------------------------
+    def _body_gyro(self):
+        # PyBullet reports angular velocity in the world frame; a real
+        # gyro measures it in the body frame.
+        return _quat_to_R(self._sim.quat[0]).T @ self._sim.ang_v[0]
+
+    def _snapshot(self):
+        s = self._sim
+        return (s.pos[0].copy(), s.vel[0].copy(),
+                s.quat[0].copy(), s.ang_v[0].copy())
 
     # --- Obs / termination ---------------------------------------------
-    def _build_obs_and_done(self, last_action):
-        state = self._sim._getDroneStateVector(0)
-        pos_true = state[0:3]
-        quat_xyzw = state[3:7]
-        vel_true = state[10:13]
-        gyro_true = state[13:16]
-        R = _quat_to_R(quat_xyzw)
+    def _observe(self, last_action):
+        """Delayed state + estimator errors, as the policy would see it."""
+        ep = self._episode_params
+        r = self._dr_ranges
+        delay = min(self._obs_delay_steps, len(self._history) - 1)
+        pos, vel, quat, ang_v = self._history[-1 - delay]
+        R_true = _quat_to_R(quat)
 
-        # Sensor noise on the observations the POLICY sees (separate from
-        # the noisy gyro fed to the rate loop above — different sensor).
-        noisy = add_sensor_noise(
-            self._rng,
-            gyro=gyro_true,
-            accel=None,
-            pos=pos_true,
-            vel=vel_true,
-            ranges=self._dr_ranges,
-        )
+        att_err = ep["att_bias_rpy"] + self._rng.normal(
+            0.0, r.att_noise_sigma_rad, 3)
+        R_est = _rpy_to_R(att_err) @ R_true
+        pos_est = pos + self._pos_drift + self._rng.normal(
+            0.0, r.pos_noise_sigma_m, 3)
+        vel_est = vel + self._vel_drift + self._rng.normal(
+            0.0, r.vel_noise_sigma_m_s, 3)
+        gyro_est = (R_true.T @ ang_v + ep["gyro_bias"]
+                    + self._rng.normal(0.0, r.gyro_noise_sigma_rad_s, 3))
 
         obs_vec = get_obs_vector(
-            pos=noisy["pos"], vel=noisy["vel"], R=R, gyro=noisy["gyro"],
+            pos=pos_est, vel=vel_est, R=R_est, gyro=gyro_est,
             last_action=last_action, target=TARGET_POSITION,
         )
+        return obs_vec.astype(np.float32), gyro_est
 
-        # Stability check uses the noisy gyro (matches what the policy
-        # would see, so the reward and observation are consistent).
-        up = upright_from_R(R)
-        unstable = is_unstable(up, noisy["gyro"])
+    def _check_done(self, obs_gyro, min_z):
+        # Stability uses the observed gyro, matching what the policy sees.
+        up = upright_from_R(_quat_to_R(self._sim.quat[0]))
+        unstable = is_unstable(up, obs_gyro)
         self._unstable_window.append(unstable)
         if len(self._unstable_window) > UNSTABLE_WINDOW:
             self._unstable_window.pop(0)
@@ -382,10 +464,10 @@ class Hover12inEnv(gym.Env):
         )
 
         # Bounds check uses TRUE position (safety, not noisy).
+        pos_true = self._sim.pos[0]
         oob = (
             abs(pos_true[0]) > BOUND_XY
             or abs(pos_true[1]) > BOUND_XY
-            or pos_true[2] < BOUND_Z_MIN
             or pos_true[2] > BOUND_Z_MAX
         )
         self._oob_window.append(oob)
@@ -396,9 +478,19 @@ class Hover12inEnv(gym.Env):
             and all(self._oob_window)
         )
 
-        terminated = bool(unstable_too_long or oob_too_long)
+        ground_hit = (min_z < GROUND_CRASH_ALTITUDE_M
+                      or self._ground_contact())
+
+        terminated = bool(unstable_too_long or oob_too_long or ground_hit)
         truncated = bool(self._elapsed >= EPISODE_STEPS)
-        return obs_vec, terminated, truncated
+        return terminated, truncated
+
+    def _ground_contact(self):
+        return len(p.getContactPoints(
+            bodyA=int(self._sim.DRONE_IDS[0]),
+            bodyB=int(self._sim.PLANE_ID),
+            physicsClientId=self._sim.CLIENT,
+        )) > 0
 
 
 def _quat_to_R(quat_xyzw):
@@ -410,6 +502,18 @@ def _quat_to_R(quat_xyzw):
         [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz),       2.0 * (xz + wy)],
         [2.0 * (xy + wz),       1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
         [2.0 * (xz - wy),       2.0 * (yz + wx),       1.0 - 2.0 * (xx + yy)],
+    ], dtype=np.float32)
+
+
+def _rpy_to_R(rpy):
+    """Rotation matrix from roll/pitch/yaw (ZYX convention)."""
+    cr, sr = np.cos(rpy[0]), np.sin(rpy[0])
+    cp, sp = np.cos(rpy[1]), np.sin(rpy[1])
+    cy, sy = np.cos(rpy[2]), np.sin(rpy[2])
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
     ], dtype=np.float32)
 
 

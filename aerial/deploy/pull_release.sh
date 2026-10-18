@@ -46,6 +46,16 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   USE_GH=1
 fi
 
+# Default to the origin remote (the fork). Without --repo, gh can pick
+# an upstream remote instead.
+if [[ -z "$REPO" ]]; then
+  if git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
+    URL=$(git -C "$REPO_ROOT" remote get-url origin)
+    # Handles both https and ssh remotes.
+    REPO=$(echo "$URL" | sed -E 's|.*github.com[:/]([^/]+/[^/.]+)(\.git)?|\1|')
+  fi
+fi
+
 if [[ $USE_GH -eq 1 ]]; then
   ARGS=(release download "$TAG"
     --pattern "$BUNDLE.tar.gz"
@@ -54,14 +64,6 @@ if [[ $USE_GH -eq 1 ]]; then
   [[ -n "$REPO" ]] && ARGS+=(--repo "$REPO")
   gh "${ARGS[@]}"
 else
-  # Guess repo from local git remote if not given.
-  if [[ -z "$REPO" ]]; then
-    if git remote get-url origin >/dev/null 2>&1; then
-      URL=$(git remote get-url origin)
-      # Handles both https and ssh remotes.
-      REPO=$(echo "$URL" | sed -E 's|.*github.com[:/]([^/]+/[^/.]+)(\.git)?|\1|')
-    fi
-  fi
   if [[ -z "$REPO" ]]; then
     echo "ERROR: pass --repo <owner>/<name> or authenticate 'gh' first." >&2
     exit 3
@@ -98,4 +100,5 @@ echo "installed bundle at: $DST"
 ls -la "$DST"
 echo ""
 echo "next step:"
-echo "  ./.venv/bin/python -m aerial.deploy.smoke_test --model models/$BUNDLE"
+echo "  ./.venv/bin/python -m aerial.deploy.npu.bench --backends numpy \\"
+echo "      --sampling mean_action --model aerial/deploy/models/$BUNDLE"

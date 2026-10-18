@@ -138,9 +138,13 @@ NumPy (planned follow-up).
   `aerial/envs/hover_12in_env.py`, which needs pybullet +
   gym_pybullet_drones; `install_orangepi.sh` no longer installs the sim
   stack. On the Pi use the `npu/` path instead
-  (`python -m aerial.deploy.npu.bench --model models/<name>`).
+  (`python -m aerial.deploy.npu.bench --backends numpy --sampling
+  mean_action --model aerial/deploy/models/<name>`). Use `mean_action`:
+  the bench default, `stochastic`, adds the policy's exploration noise to
+  every command.
 - **No safety limits.** For tethered flight, wrap `policy.step()` in a
-  clamp (max body rate 3 rad/s, thrust ceiling 0.5, watchdog on
+  clamp (max body rate 3 rad/s, thrust ceiling ~0.7 — the F450 hovers
+  near 0.46, so a lower ceiling leaves no room to climb — watchdog on
   step-rate slippage). Don't fly with raw policy output.
 
 ## Safety before real flight
@@ -149,9 +153,10 @@ The current best model is 42% success at Stage 1c. That's a 58% crash
 rate on random init conditions in sim — DO NOT fly untethered until:
 
 1. A policy passes 90%+ sim eval AND passes SITL validation (Phase 4).
-2. Airframe params in `aerial/configs/airframe_12in.py` are replaced
-   with real-hardware measurements (mass, arm length, thrust curve,
-   motor time constant).
+2. Airframe params in `aerial/configs/airframe_12in.py` (since
+   2026-10-17 the F450 kit, with part masses and thrust estimated from
+   listings) are checked against measurements: weighed parts, hover
+   thrust (ArduPilot MOT_THST_HOVER), motor time constant.
 3. Retraining includes the measured airframe.
 
 The current bundle is for **inference-latency and integration testing

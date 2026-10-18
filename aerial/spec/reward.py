@@ -6,10 +6,15 @@ indices) so the same function runs against PyBullet, Aerial Gym, or
 ArduPilot SITL with no changes.
 
 Reward design:
-  * Dense terms (position, velocity, gyro, upright) sum to ~1.0/step at
-    perfect hover.
+  * Dense terms (position, velocity, gyro, upright, hold) sum to ~1.25/step
+    at perfect hover.
+  * Hold term pays only for being near the target AND nearly still, so a
+    loose orbit around the target earns much less than holding it.
+  * Ground term penalizes flying below GROUND_SAFE_ALTITUDE_M. Ground
+    contact itself is a crash (enforced by the env).
   * Smoothness penalty discourages thrash.
-  * Survival bonus + stability-streak bonus reward staying alive.
+  * Survival bonus + stability-streak bonus reward staying alive. Any
+    stable step still earns > 0, so crashing is never preferable.
   * Unstable steps return a fixed penalty instead of the dense sum, so
     the model can't farm dense reward while flailing.
   * Crash penalty applied externally on terminal step.
@@ -29,30 +34,37 @@ CRASH_PENALTY = -10.0
 # Side objective: reward staying upright continuously. Saturates so it
 # can't dominate position-tracking reward. TAU = 50 steps = 1.0s at 50 Hz
 # means 63% of plateau at 1s, 95% at 3s.
-STABILITY_STREAK_MAX = 0.15
+STABILITY_STREAK_MAX = 0.10       # was 0.15 before 2026-10-16
 STABILITY_STREAK_TAU = 50.0
 
 # --- Dense-term weights -------------------------------------------------
+# Before 2026-10-16, terms earned just for staying upright and alive
+# (upright 0.30, gyro 0.15, survival 0.10, streak 0.15) were ~56% of the
+# max reward, so orbiting 0.5 m off target or skimming 20 cm above the
+# floor still earned ~70-74% of max.
 W_POSITION = 0.30
-W_VELOCITY = 0.15
-W_GYRO = 0.15
-W_UPRIGHT = 0.30
+W_VELOCITY = 0.10           # was 0.15
+W_GYRO = 0.10               # was 0.15
+W_UPRIGHT = 0.15            # was 0.30
 W_SMOOTHNESS = 0.02
-SURVIVAL_BONUS = 0.10
+SURVIVAL_BONUS = 0.15       # was 0.10
 
 # --- Shaping tuned from Phase 0 quantitative eval -----------------------
-# Phase 0 policy hovered at ~0.58m offset with ~0.5m/s drift because the
-# original exp(-dist) and exp(-0.5*speed) gave too much partial credit
-# for "close enough". Sharpening the decay forces the policy to actually
-# nail the target instead of settling into a stable orbit.
 POSITION_DECAY = 2.0        # was 1.0 in Phase 0
 VELOCITY_DECAY = 1.0        # was 0.5 in Phase 0
 
-# Tight-target bonus: flat additive reward when the drone is within
-# TIGHT_TARGET_RADIUS meters of the target. Small enough not to dominate
-# but large enough to break ties in favor of "actually on target".
-TIGHT_TARGET_BONUS = 0.10
-TIGHT_TARGET_RADIUS = 0.2   # meters
+# Hold term: exp(-8*dist) * exp(-4*speed). Replaces the flat +0.10 bonus
+# inside 0.2 m, which gave no gradient toward the center and none for
+# holding still. Worth 0.35 at d=0, v=0; ~0.10 at d=0.1 m, v=0.1 m/s;
+# ~0 beyond 0.4 m, so it doesn't distort far-field recovery.
+W_HOLD = 0.35
+HOLD_POS_DECAY = 8.0        # 1/m
+HOLD_VEL_DECAY = 4.0        # s/m
+
+# Ground term: linear penalty below GROUND_SAFE_ALTITUDE_M, reaching
+# -0.175 at the env's 0.15 m ground-crash altitude.
+W_GROUND = 0.25
+GROUND_SAFE_ALTITUDE_M = 0.5
 
 
 @dataclass
@@ -74,7 +86,7 @@ def is_unstable(up_axis, gyro):
     return bool(up_axis < UPRIGHT_THRESHOLD) or bool(gyro_mag > GYRO_THRESHOLD)
 
 
-def step_reward(pos_err, vel, gyro, up_axis, action, state):
+def step_reward(pos_err, vel, gyro, up_axis, altitude, action, state):
     """Compute one step's reward and update streak counter in `state`.
 
     Args:
@@ -82,6 +94,7 @@ def step_reward(pos_err, vel, gyro, up_axis, action, state):
       vel:     (3,) world linear velocity, m/s.
       gyro:    (3,) body angular velocity, rad/s.
       up_axis: scalar in [-1, 1], world-z component of body-z (R[2,2]).
+      altitude: height of the body above the ground, meters.
       action:  (4,) current policy action in [-1, 1].
       state:   RewardState (mutated in place).
 
@@ -120,17 +133,20 @@ def step_reward(pos_err, vel, gyro, up_axis, action, state):
     r_streak = STABILITY_STREAK_MAX * (
         1.0 - float(np.exp(-state.stable_streak / STABILITY_STREAK_TAU))
     )
-    r_tight = TIGHT_TARGET_BONUS if dist < TIGHT_TARGET_RADIUS else 0.0
+    r_hold = float(np.exp(-HOLD_POS_DECAY * dist - HOLD_VEL_DECAY * speed))
+    r_ground = -W_GROUND * max(
+        0.0, (GROUND_SAFE_ALTITUDE_M - float(altitude)) / GROUND_SAFE_ALTITUDE_M)
 
     reward = (
         W_POSITION * r_position
         + W_VELOCITY * r_velocity
         + W_GYRO * r_gyro
         + W_UPRIGHT * r_upright
+        + W_HOLD * r_hold
+        + r_ground
         + r_smoothness
         + SURVIVAL_BONUS
         + r_streak
-        + r_tight
     )
 
     return float(reward), {
@@ -145,6 +161,7 @@ def step_reward(pos_err, vel, gyro, up_axis, action, state):
         "r_upright": r_upright,
         "r_smoothness": r_smoothness,
         "r_streak": r_streak,
-        "r_tight": r_tight,
+        "r_hold": r_hold,
+        "r_ground": r_ground,
         "streak": float(state.stable_streak),
     }

@@ -26,6 +26,24 @@ Rationale for the ranges:
     plus per-vehicle tuning variance
   * Init pos ±2m, init rpy ±30°: exercises recovery from significant
     displacement, unlike Phase 0 where init was within success radius
+
+Added 2026-10-16 (sim-realism pass, airframe-independent). Values are
+judgment calls until the real vehicle and positioning system are known:
+  * Per-motor thrust imbalance ±5% and CG offset ±1.5 cm: build
+    variation; creates a steady torque the FC's I-term must trim.
+  * Drag scale 0.5-2x: drag coefficients are scaled-up cf2x guesses.
+  * Action latency 5-40 ms + observation latency 0-20 ms: companion
+    computer <-> MAVLink <-> FC round trip, at physics-step resolution.
+  * Estimator error: gyro bias, attitude bias + noise (yaw bias up to
+    ~5 deg, as from compass error), slowly drifting position/velocity
+    error (Gauss-Markov), on top of white noise.
+  * Wind gusts: Ornstein-Uhlenbeck force on top of the per-episode mean.
+
+Changed 2026-10-17 for the F450 airframe (1.51 kg, was a 0.8 kg
+placeholder): wind and gust forces scaled by the weight ratio (x1.89)
+so they stay the same fraction of weight. With the F450's rotor drag
+(~0.38 N per m/s), the Stage 1c sigmas are about 1.5 m/s of mean wind
+and 0.75 m/s of gust. Mass +-20% covers adding a camera (~+8%).
 """
 from dataclasses import dataclass
 from typing import Tuple
@@ -44,9 +62,13 @@ class DomainRandomizationRanges:
     motor_thrust_scale: Tuple[float, float] = (0.85, 1.15)
     motor_tau_scale: Tuple[float, float] = (0.70, 1.30)
     rate_kp_scale: Tuple[float, float] = (0.80, 1.20)  # rate controller gain jitter
+    drag_scale: Tuple[float, float] = (0.5, 2.0)
+    motor_imbalance: float = 0.05        # each motor 1 ± this, on top of motor_thrust_scale
+    cg_offset_m: float = 0.015           # x and y, uniform ± this
 
     # --- Per-episode (absolute) -----------------------------------------
-    control_latency_s: Tuple[float, float] = (0.000, 0.030)  # 0-30 ms
+    control_latency_s: Tuple[float, float] = (0.005, 0.040)  # action delay
+    obs_latency_s: Tuple[float, float] = (0.000, 0.020)      # observation delay
     init_pos_range_m: Tuple[float, float] = (-2.0, 2.0)      # per xy axis
     init_z_range_m: Tuple[float, float] = (-1.0, 1.0)        # around target z
     init_rpy_range_deg: Tuple[float, float] = (-30.0, 30.0)  # per axis
@@ -54,13 +76,25 @@ class DomainRandomizationRanges:
     # --- Per-step sensor noise (Gaussian sigma) -------------------------
     gyro_noise_sigma_rad_s: float = 0.05
     accel_noise_sigma_m_s2: float = 0.10
-    pos_noise_sigma_m: float = 0.02      # position estimator drift
-    vel_noise_sigma_m_s: float = 0.05    # velocity estimator drift
+    pos_noise_sigma_m: float = 0.02
+    vel_noise_sigma_m_s: float = 0.05
+    att_noise_sigma_rad: float = 0.004
 
-    # --- External disturbance (per-step wind gust) ---------------------
-    # Simple constant-per-episode wind, sampled at reset. World-frame
-    # force applied every step. Zero-mean so nominal case has no wind.
-    wind_force_sigma_N: float = 0.3      # ~4% of hover thrust
+    # --- Estimator bias / drift ------------------------------------------
+    gyro_bias_sigma_rad_s: float = 0.015     # per episode, per axis
+    att_bias_sigma_rad: float = 0.015        # roll/pitch, per episode
+    yaw_bias_max_rad: float = 0.09           # uniform ±, per episode
+    pos_drift_sigma_m: float = 0.06          # Gauss-Markov steady-state sigma
+    pos_drift_tau_s: float = 3.0
+    vel_drift_sigma_m_s: float = 0.03
+    vel_drift_tau_s: float = 1.0
+
+    # --- External disturbance ---------------------------------------------
+    # Mean wind: constant world-frame force per episode, zero-mean so the
+    # nominal case has no wind. Gusts: Ornstein-Uhlenbeck force on top.
+    wind_force_sigma_N: float = 0.57     # ~4% of weight; ~1.5 m/s of wind
+    gust_force_sigma_N: float = 0.28     # ~0.75 m/s
+    gust_tau_s: float = 1.5
 
 
 # --- Full target ranges (Phase 1c = original DEFAULT) ------------------
@@ -77,7 +111,11 @@ STAGE_1A = DomainRandomizationRanges(
     motor_thrust_scale=(0.92, 1.08),
     motor_tau_scale=(0.85, 1.15),
     rate_kp_scale=(0.90, 1.10),
-    control_latency_s=(0.000, 0.015),
+    drag_scale=(0.8, 1.25),
+    motor_imbalance=0.02,
+    cg_offset_m=0.005,
+    control_latency_s=(0.005, 0.020),
+    obs_latency_s=(0.000, 0.010),
     init_pos_range_m=(-0.5, 0.5),
     init_z_range_m=(-0.3, 0.3),
     init_rpy_range_deg=(-10.0, 10.0),
@@ -85,7 +123,14 @@ STAGE_1A = DomainRandomizationRanges(
     accel_noise_sigma_m_s2=0.05,
     pos_noise_sigma_m=0.01,
     vel_noise_sigma_m_s=0.025,
-    wind_force_sigma_N=0.15,
+    att_noise_sigma_rad=0.002,
+    gyro_bias_sigma_rad_s=0.005,
+    att_bias_sigma_rad=0.005,
+    yaw_bias_max_rad=0.03,
+    pos_drift_sigma_m=0.02,
+    vel_drift_sigma_m_s=0.01,
+    wind_force_sigma_N=0.28,
+    gust_force_sigma_N=0.095,
 )
 
 # --- Phase 1a5: bridge stage between 1a and 1b -------------------------
@@ -100,7 +145,11 @@ STAGE_1A5 = DomainRandomizationRanges(
     motor_thrust_scale=(0.90, 1.10),
     motor_tau_scale=(0.82, 1.18),
     rate_kp_scale=(0.88, 1.12),
-    control_latency_s=(0.000, 0.018),
+    drag_scale=(0.7, 1.4),
+    motor_imbalance=0.03,
+    cg_offset_m=0.0075,
+    control_latency_s=(0.005, 0.025),
+    obs_latency_s=(0.000, 0.012),
     init_pos_range_m=(-0.75, 0.75),
     init_z_range_m=(-0.4, 0.4),
     init_rpy_range_deg=(-15.0, 15.0),
@@ -108,7 +157,14 @@ STAGE_1A5 = DomainRandomizationRanges(
     accel_noise_sigma_m_s2=0.063,
     pos_noise_sigma_m=0.012,
     vel_noise_sigma_m_s=0.031,
-    wind_force_sigma_N=0.18,
+    att_noise_sigma_rad=0.0025,
+    gyro_bias_sigma_rad_s=0.0075,
+    att_bias_sigma_rad=0.0075,
+    yaw_bias_max_rad=0.045,
+    pos_drift_sigma_m=0.03,
+    vel_drift_sigma_m_s=0.015,
+    wind_force_sigma_N=0.34,
+    gust_force_sigma_N=0.15,
 )
 
 # --- Phase 1b: intermediate (added later when 1a converges) ------------
@@ -119,7 +175,11 @@ STAGE_1B = DomainRandomizationRanges(
     motor_thrust_scale=(0.88, 1.12),
     motor_tau_scale=(0.78, 1.22),
     rate_kp_scale=(0.85, 1.15),
-    control_latency_s=(0.000, 0.022),
+    drag_scale=(0.6, 1.6),
+    motor_imbalance=0.04,
+    cg_offset_m=0.01,
+    control_latency_s=(0.005, 0.030),
+    obs_latency_s=(0.000, 0.015),
     init_pos_range_m=(-1.0, 1.0),
     init_z_range_m=(-0.5, 0.5),
     init_rpy_range_deg=(-20.0, 20.0),
@@ -127,7 +187,14 @@ STAGE_1B = DomainRandomizationRanges(
     accel_noise_sigma_m_s2=0.075,
     pos_noise_sigma_m=0.015,
     vel_noise_sigma_m_s=0.038,
-    wind_force_sigma_N=0.22,
+    att_noise_sigma_rad=0.003,
+    gyro_bias_sigma_rad_s=0.01,
+    att_bias_sigma_rad=0.01,
+    yaw_bias_max_rad=0.06,
+    pos_drift_sigma_m=0.04,
+    vel_drift_sigma_m_s=0.02,
+    wind_force_sigma_N=0.42,
+    gust_force_sigma_N=0.19,
 )
 
 _STAGES = {
@@ -162,23 +229,48 @@ def sample_episode_params(rng: np.random.Generator,
                           ranges: DomainRandomizationRanges = DEFAULT) -> dict:
     """Draw one episode's frozen randomization values.
 
-    Returns a dict of concrete parameters that the env applies at reset:
-      mass_scale, inertia_scale, motor_thrust_scale, motor_tau_scale,
-      rate_kp_scale, control_latency_s, wind_force_world (3,).
+    motor_scales (4,) already includes motor_thrust_scale times each
+    motor's individual imbalance.
     """
+    thrust_scale = float(rng.uniform(*ranges.motor_thrust_scale))
+    imbalance = rng.uniform(
+        -ranges.motor_imbalance, ranges.motor_imbalance, size=4)
     return {
         "mass_scale":         float(rng.uniform(*ranges.mass_scale)),
         "inertia_scale":      float(rng.uniform(*ranges.inertia_scale)),
-        "motor_thrust_scale": float(rng.uniform(*ranges.motor_thrust_scale)),
+        "motor_thrust_scale": thrust_scale,
+        "motor_scales":       (thrust_scale * (1.0 + imbalance)).astype(np.float32),
         "motor_tau_scale":    float(rng.uniform(*ranges.motor_tau_scale)),
         "rate_kp_scale":      float(rng.uniform(*ranges.rate_kp_scale)),
+        "drag_scale":         float(rng.uniform(*ranges.drag_scale)),
+        "cg_offset_m":        rng.uniform(
+            -ranges.cg_offset_m, ranges.cg_offset_m, size=2).astype(np.float32),
         "control_latency_s":  float(rng.uniform(*ranges.control_latency_s)),
-        "wind_force_world":   rng.normal(
-            0.0, ranges.wind_force_sigma_N, size=3).astype(np.float32),
+        "obs_latency_s":      float(rng.uniform(*ranges.obs_latency_s)),
+        "gyro_bias":          rng.normal(
+            0.0, ranges.gyro_bias_sigma_rad_s, size=3).astype(np.float32),
+        "att_bias_rpy":       np.array([
+            rng.normal(0.0, ranges.att_bias_sigma_rad),
+            rng.normal(0.0, ranges.att_bias_sigma_rad),
+            rng.uniform(-ranges.yaw_bias_max_rad, ranges.yaw_bias_max_rad),
+        ], dtype=np.float32),
+        "wind_force_world":   (rng.normal(0.0, ranges.wind_force_sigma_N, size=3)
+                               * WIND_AXIS_SCALE).astype(np.float32),
     }
 
 
-MIN_INIT_ALTITUDE_M = 0.10  # avoid spawning below/on the ground
+# Per-axis scale (x, y, z) on the wind and gust sigmas. Near flat ground
+# mean wind is close to horizontal, and low-altitude turbulence models
+# (Dryden, MIL-F-8785C) put vertical gusts at about half the horizontal
+# ones. Before 2026-10-17 all three axes used the full sigma, so a weak
+# vehicle could meet a ~3 m/s downdraft.
+WIND_AXIS_SCALE = np.array([1.0, 1.0, 0.2])
+GUST_AXIS_SCALE = np.array([1.0, 1.0, 0.5])
+
+
+# Must stay well above the env's ground-crash altitude (0.255 m for the
+# F450, which stands at 0.155 m on its legs).
+MIN_INIT_ALTITUDE_M = 0.40
 
 
 def sample_init_pose(rng: np.random.Generator,
@@ -199,25 +291,3 @@ def sample_init_pose(rng: np.random.Generator,
     rpy_deg = rng.uniform(*ranges.init_rpy_range_deg, size=3)
     rpy_rad = np.deg2rad(rpy_deg).astype(np.float32)
     return pos, rpy_rad
-
-
-def add_sensor_noise(rng: np.random.Generator,
-                     gyro: np.ndarray,
-                     accel: np.ndarray | None,
-                     pos: np.ndarray,
-                     vel: np.ndarray,
-                     ranges: DomainRandomizationRanges = DEFAULT
-                     ) -> dict:
-    """Return noise-corrupted copies of the sensor readings."""
-    return {
-        "gyro":  gyro + rng.normal(
-            0.0, ranges.gyro_noise_sigma_rad_s, size=3).astype(gyro.dtype),
-        "accel": (None if accel is None
-                  else accel + rng.normal(
-                      0.0, ranges.accel_noise_sigma_m_s2,
-                      size=3).astype(accel.dtype)),
-        "pos":   pos + rng.normal(
-            0.0, ranges.pos_noise_sigma_m, size=3).astype(pos.dtype),
-        "vel":   vel + rng.normal(
-            0.0, ranges.vel_noise_sigma_m_s, size=3).astype(vel.dtype),
-    }

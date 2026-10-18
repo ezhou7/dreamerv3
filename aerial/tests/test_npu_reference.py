@@ -206,10 +206,11 @@ def test_against_agent_policy(agent, bundle):
         carry = new_carry
 
 
-def test_eval_mode_is_stochastic(agent):
-    """Documents a finding: Agent.policy ignores mode='eval', so the same
-    obs + carry gives different actions on repeated calls."""
-    carry = agent.init_policy(batch_size=1)
+def test_eval_mode_acts_with_policy_mean(agent, bundle):
+    """mode='eval' returns the Gaussian action mean for the sampled latent
+    (same as NumpyPolicyInference(sampling='mean_action')); mode='train'
+    samples around it."""
+    ref = ReferencePolicy.load(bundle / 'policy_weights.npz')
     obs = {
         'vector': np.zeros((1, OBS_DIM), np.float32),
         'is_first': np.array([True]),
@@ -217,9 +218,13 @@ def test_eval_mode_is_stochastic(agent):
         'is_terminal': np.array([False]),
         'reward': np.zeros(1, np.float32),
     }
-    a1 = np.asarray(agent.policy(carry, obs, mode='eval')[1]['action'])
-    a2 = np.asarray(agent.policy(carry, obs, mode='eval')[1]['action'])
-    assert not np.allclose(a1, a2)
+    for mode, expect_mean in [('eval', True), ('train', False)]:
+        carry, act, _ = agent.policy(
+            agent.init_policy(batch_size=1), obs, mode=mode)
+        mean, _ = ref.actor(np.asarray(carry[1]['deter']),
+                            np.asarray(carry[1]['stoch']))
+        is_mean = np.allclose(np.asarray(act['action']), mean, atol=ATOL)
+        assert is_mean == expect_mean, mode
 
 
 @pytest.mark.parametrize('sampling', ['stochastic', 'mean_action',
