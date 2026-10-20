@@ -11,6 +11,8 @@ Backends:
   numpy  aerial.deploy.npu.reference (CPU, numpy only)
   jax    the current deploy path (agent.policy on JAX CPU), built without
          the PyBullet env import
+  rknn   RK3588 NPU via rknn-toolkit-lite2 (needs core.rknn/actor.rknn from
+         export_onnx.py + convert_rknn.py)
 
 No trained model handy? Make a dummy bundle (random weights, same shapes):
     python -m aerial.deploy.npu.jax_agent --out aerial/deploy/models/dummy
@@ -41,6 +43,9 @@ def make_backend(name, model_dir, sampling):
     if name == 'jax':
         from aerial.deploy.npu import jax_agent
         return jax_agent.JaxPolicy(jax_agent.load_bundle_agent(model_dir))
+    if name == 'rknn':
+        from aerial.deploy.npu.rknn_policy import RKNNPolicyInference
+        return RKNNPolicyInference(model_dir, sampling=sampling, seed=0)
     raise ValueError(f'unknown backend {name!r}')
 
 
@@ -61,6 +66,7 @@ def time_policy(policy, steps, warmup, seed=0):
         'n': int(t.size),
         'mean_ms': float(t.mean()),
         'p50_ms': float(np.percentile(t, 50)),
+        'p75_ms': float(np.percentile(t, 75)),
         'p90_ms': float(np.percentile(t, 90)),
         'p99_ms': float(np.percentile(t, 99)),
         'max_ms': float(t.max()),
@@ -115,7 +121,8 @@ def main():
         results['backends'][name] = stats
         ok = 'OK' if stats['p99_ms'] < budget else 'TOO SLOW'
         print(f'{name:>6}: load {load_s:5.1f}s  mean {stats["mean_ms"]:6.2f}  '
-              f'p50 {stats["p50_ms"]:6.2f}  p99 {stats["p99_ms"]:6.2f}  '
+              f'p50 {stats["p50_ms"]:6.2f}  p75 {stats["p75_ms"]:6.2f}  '
+              f'p90 {stats["p90_ms"]:6.2f}  p99 {stats["p99_ms"]:6.2f}  '
               f'max {stats["max_ms"]:6.2f} ms  '
               f'(budget {budget:.0f} ms: {ok})')
     if args.json:

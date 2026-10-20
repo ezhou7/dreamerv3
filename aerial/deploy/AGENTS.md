@@ -38,7 +38,7 @@ Two delivery paths coexist:
 | `publish_release.sh` | Dev | Tar-gz a bundle, sha256 it, create/refresh a GitHub Release with both assets. Uses `gh api` (works with default `repo` scope) — NOT `gh release create` (needs `workflow` scope). | `gh` authenticated, `tar`, `sha256sum` |
 | `pull_release.sh` | Pi | Download release assets, verify sha256, extract into `aerial/deploy/models/`. Uses `gh` when authenticated, `curl` otherwise. | `gh` OR `curl`, `sha256sum` |
 | `install_orangepi.sh` | Pi | One-shot Python env setup on Orange Pi. Default installs only `numpy<2` + `ruamel.yaml` (numpy backend); `--jax` adds `jax[cpu]==0.4.38` + ninjax/elements/etc. Never pip-installs `embodied` (repo ships it; PyPI sdist is broken) or the sim stack. | Debian-based ARM64 Linux, Python 3.10+ |
-| `npu/` | Both | JAX-free policy: `extract_weights.py` (agent.pkl → policy_weights.npz), `reference.py` (`NumpyPolicyInference`), `bench.py` (per-backend latency), `jax_agent.py` (agent without PyBullet, dummy bundles). Parity-tested in `aerial/tests/test_npu_reference.py`. Plan: `NPU_PLAN.md`. | numpy (+ JAX for `jax_agent.py`) |
+| `npu/` | Both | JAX-free policy: `extract_weights.py` (agent.pkl → policy_weights.npz), `reference.py` (`NumpyPolicyInference`), `bench.py` (per-backend latency), `jax_agent.py` (agent without PyBullet, dummy bundles). RK3588 NPU: `export_onnx.py` → `convert_rknn.py` → `rknn_policy.py` (`RKNNPolicyInference`). `run_policy.py` prints actions / flies a numpy F450 sim. Parity-tested in `aerial/tests/test_npu_reference.py` and `test_npu_onnx.py`. Plan: `NPU_PLAN.md`. | numpy (+ JAX for `jax_agent.py`; onnx/rknn-toolkit2/rknn-toolkit-lite2 for the NPU path) |
 | `README.md` | — | Human-facing usage instructions. | — |
 | `AGENTS.md` | — | This file. | — |
 
@@ -316,6 +316,13 @@ python aerial/deploy/export_model.py \
 # Latency bench (numpy backend; pin to an A76 core)
 taskset -c 4 ./.venv/bin/python -m aerial.deploy.npu.bench \
   --model aerial/deploy/models/<bundle-name> --backends numpy
+
+# See what the policy does (probe states, or closed loop in a numpy F450 sim)
+./.venv/bin/python -m aerial.deploy.npu.run_policy \
+  --model aerial/deploy/models/<bundle-name> --mode sim
+
+# NPU backend (after install_orangepi.sh --npu; see NPU_PLAN.md)
+export LIBRKNNRT_PATH=$PWD/.venv/rknnrt/librknnrt.so
 
 # --- Both ---
 
