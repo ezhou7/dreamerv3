@@ -162,10 +162,10 @@ def export(logdir, name, out_root, ckpt=None, step=None, verbose=True):
         print(f'stripped {n_stripped} ref_pol keys from agent.pkl')
 
     # Sidecar files.
-    for name in ('step.pkl', 'done', 'replay.pkl'):
-        src = src_ckpt / name
+    for fname in ('step.pkl', 'done', 'replay.pkl'):
+        src = src_ckpt / fname
         if src.exists():
-            shutil.copy(src, dst / name)
+            shutil.copy(src, dst / fname)
 
     # Config: rewrite for CPU-only headless.
     src_cfg = logdir / 'config.yaml'
