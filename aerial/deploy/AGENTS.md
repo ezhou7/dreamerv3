@@ -153,9 +153,12 @@ Break any of these and something silently corrupts.
    `export_model.py:sanitize_path()` handles this. Public release
    tarballs must not leak the trainer's Linux username.
 
-3. **JAX is forced onto CPU in `inference.py` before `import jax`.**
-   Setting `JAX_PLATFORMS=cpu` mid-import doesn't work — it must be an
-   env var at Python startup.
+3. **`inference.py` picks the JAX device through the agent config,
+   not `JAX_PLATFORMS`.** The bundle's saved `jax.platform` is applied
+   after import and overrides the env var, so `PolicyInference`
+   overwrites `jax.platform` / `jax.cuda_visible_devices`. Default is
+   CPU (Orange Pi); pass `cuda_device='1'` on the dev machine (the
+   Blackwell). Leaving the device unpinned lets JAX grab GPU 0.
 
 4. **The bundle contains exactly:** `agent.pkl`, `config.yaml`,
    `meta.json`, `step.pkl`, `done`, `replay.pkl`. Never commit any of
@@ -215,16 +218,18 @@ the command substitution before `if` gets a chance to branch. Use
 `gh api ... || true` and check for empty output instead. Fixed in
 `publish_release.sh` — pattern to follow elsewhere.
 
-### 5. `mode='eval'` does NOT make the policy deterministic
+### 5. `mode='eval'` acts with the action mean (since 2026-10-16)
 
-`dreamerv3/agent.py:Agent.policy` accepts `mode` but never reads it, so
-`mode='eval'` (eval_quantitative.py, inference.py, smoke_test) still
-*samples* both the RSSM latent and the Gaussian action, exactly like
-training. Same obs + carry → different actions
-(`aerial/tests/test_npu_reference.py::test_eval_mode_is_stochastic`).
-`npu.reference.NumpyPolicyInference(sampling=...)` makes the choice
-explicit: `stochastic` (matches JAX), `mean_action`, `deterministic`.
-Pick for deployment by closed-loop sim eval.
+Before 2026-10-16, `Agent.policy` ignored `mode`, so eval, deployment
+and training all *sampled* the Gaussian action. Closed-loop sim eval
+picked the mean for deployment: sampled actions shake the drone hard
+enough to triple its hover error. Now `mode='eval'` (eval_quantitative.py,
+inference.py, smoke_test) returns the Gaussian mean; the RSSM latent is
+still sampled. `mode='train'` still samples, for exploration
+(`aerial/tests/test_npu_reference.py::test_eval_mode_acts_with_policy_mean`).
+`npu.reference.NumpyPolicyInference` defaults to the matching
+`mean_action`; `stochastic` and `deterministic` remain available.
+Eval numbers recorded before this date used sampled actions.
 
 ### 6. PyBullet is imported at env-registration time
 
@@ -268,9 +273,9 @@ Missing pieces in likely order:
    to `LOCAL_POSITION_NED`, `ATTITUDE_QUATERNION`, `HIGHRES_IMU`; pack
    the 22-dim obs; send `SET_ATTITUDE_TARGET` at 50 Hz.
 2. **Safety layer** — clamp body rates to a conservative envelope
-   (3 rad/s), thrust ≤ 0.5, watchdog on step-rate slippage. Never fly
-   raw policy output.
-3. **Real hardware measurements** — replace placeholders in
+   (3 rad/s), thrust ≤ ~0.7 (the F450 hovers near 0.46), watchdog on
+   step-rate slippage. Never fly raw policy output.
+3. **Real hardware measurements** — check the F450 estimates in
    `aerial/configs/airframe_12in.py` (mass, arm length, thrust curve,
    motor τ), retrain with those, then export the improved bundle.
 4. **SITL validation** (Phase 4) — real ArduPilot firmware in

@@ -197,12 +197,13 @@ class NumpyPolicyInference:
 
     sampling:
         'stochastic'    -- sample latent + Gaussian action. Matches JAX
-                                             `agent.policy()` in every mode (it ignores `mode`).
+                           `agent.policy(mode='train')`.
         'mean_action'   -- sample latent, act with the Gaussian mean.
+                           Matches JAX `agent.policy(mode='eval')`.
         'deterministic' -- argmax latent + mean action. Fully repeatable.
     """
 
-    def __init__(self, model_dir, sampling='stochastic', seed=None):
+    def __init__(self, model_dir, sampling='mean_action', seed=None):
         if sampling not in SAMPLING_MODES:
             raise ValueError(f'sampling must be one of {SAMPLING_MODES}')
         path = Path(model_dir)

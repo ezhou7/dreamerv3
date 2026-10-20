@@ -17,10 +17,11 @@ aerial-spec layout:
                     throttle by scale_action().
 
 This module is intended to run on ARM Linux (Orange Pi companion
-computer) as well as on the dev machine. It forces JAX onto CPU so the
-Orange Pi has no CUDA dependency; on the dev machine you can still call
-it from a GPU-preallocating process because we set the flag before jax
-is imported.
+computer) as well as on the dev machine. By default it runs JAX on CPU
+so the Orange Pi has no CUDA dependency. On the dev machine pass
+`cuda_device='1'` to run on the training GPU instead.
+
+Actions are the policy distribution mean (mode='eval'), not samples.
 """
 import os
 
@@ -45,26 +46,32 @@ from dreamerv3.main import make_agent, make_env  # noqa: E402
 class PolicyInference:
     """Loads a DreamerV3 checkpoint and answers one action per obs."""
 
-    def __init__(self, model_dir, config_name=None):
+    def __init__(self, model_dir, config_name=None, cuda_device=None):
         """model_dir contains: agent.pkl, config.yaml (bundled by
         export_model.py). config_name defaults to reading config.yaml.
+        cuda_device: None runs on CPU; a CUDA index string (e.g. '1')
+        pins JAX to that GPU.
         """
         self.model_dir = Path(model_dir)
-        self._load_config(config_name)
+        self._load_config(config_name, cuda_device)
         self._make_agent()
         self._load_checkpoint()
         self._carry = None
 
-    def _load_config(self, config_name):
+    def _load_config(self, config_name, cuda_device):
         cfg_path = self.model_dir / 'config.yaml'
         with cfg_path.open() as f:
             cfg = yaml.YAML(typ='safe').load(f)
         # Bundled config is already flat (the run's saved config, not
         # the multi-block configs.yaml). Wrap in an elements.Config.
         self.config = elements.Config(cfg)
-        # Force CPU + headless env.
+        # The bundle's saved jax.platform is applied after import and
+        # overrides JAX_PLATFORMS, so the device must be set here.
         self.config = self.config.update({
-            'jax.cuda_visible_devices': '',
+            'jax.platform': 'cuda' if cuda_device is not None else 'cpu',
+            'jax.prealloc': False,
+            'jax.cuda_visible_devices': (
+                str(cuda_device) if cuda_device is not None else ''),
             'jax.compute_dtype': 'float32',
             'env.aerial.gui': False,
         })

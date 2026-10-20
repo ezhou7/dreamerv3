@@ -50,6 +50,12 @@ if ! gh auth status >/dev/null 2>&1; then
   exit 3
 fi
 
+# Publish to the origin remote (the fork). Plain `gh repo view` can
+# resolve to the upstream remote instead.
+REPO_SLUG=$(gh repo view "$(git -C "$REPO_ROOT" remote get-url origin)" \
+  --json nameWithOwner -q .nameWithOwner)
+echo "repo:    $REPO_SLUG"
+
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
 TARBALL="$STAGE_DIR/$BUNDLE.tar.gz"
@@ -86,7 +92,6 @@ NOTES_FILE="$STAGE_DIR/notes.md"
   echo ""
   echo "Or manually:"
   echo '```bash'
-  REPO_SLUG=$(gh repo view --json nameWithOwner -q .nameWithOwner)
   BASE_URL="https://github.com/${REPO_SLUG}/releases/download/${TAG}"
   echo "curl -L -o ${BUNDLE}.tar.gz ${BASE_URL}/${BUNDLE}.tar.gz"
   echo "sha256sum -c <(echo \"$SHA  ${BUNDLE}.tar.gz\")"
@@ -109,12 +114,18 @@ NOTES_FILE="$STAGE_DIR/notes.md"
 # We use `gh api` rather than `gh release create` because the latter
 # requires the "workflow" scope while the former works with the default
 # "repo" scope from `gh auth login`.
-REPO_SLUG=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
 # Check whether the release already exists; if so, reuse its id and
 # clobber the assets. `|| true` prevents `set -e` from tripping when the
 # release doesn't exist (gh api returns non-zero on 404).
 RELEASE_JSON=$(gh api "repos/$REPO_SLUG/releases/tags/$TAG" 2>/dev/null || true)
+# Newer gh prints the 404 body ({"message":"Not Found",...}) on stdout,
+# so only a body with an "id" means the release exists.
+if ! printf '%s' "$RELEASE_JSON" | python3 -c \
+    'import sys,json; sys.exit(0 if "id" in json.load(sys.stdin) else 1)' \
+    2>/dev/null; then
+  RELEASE_JSON=""
+fi
 if [[ -n "$RELEASE_JSON" ]]; then
   RELEASE_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
   echo "release $TAG already exists (id=$RELEASE_ID); replacing assets"

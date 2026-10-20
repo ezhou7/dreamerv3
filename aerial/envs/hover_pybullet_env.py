@@ -217,6 +217,7 @@ class HoverPybulletEnv(gym.Env):
             vel=obs_vec[3:6],
             gyro=obs_vec[15:18],
             up_axis=upright_from_R(obs_vec[6:15].reshape(3, 3)),
+            altitude=obs_vec[2] + TARGET_POSITION[2],
             action=raw,
             state=self._reward_state,
         )

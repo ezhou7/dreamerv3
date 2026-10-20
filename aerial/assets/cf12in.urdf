@@ -1,67 +1,154 @@
 <?xml version="1.0" ?>
 
-<!-- 12-inch multirotor URDF for gym-pybullet-drones.
+<!-- QWinOut F450 quad (450 mm wheelbase, 1045 props) for gym-pybullet-drones.
 
-Parameters chosen to match aerial/configs/airframe_12in.py placeholder
-estimates for a generic long-range / cine-FPV 12" quad. Refine with
-measured airframe values before Phase 4 (SITL) and Phase 5 (real flight).
+The file name still says 12in; since 2026-10-17 the values match
+aerial/configs/airframe_12in.py DEFAULT_12IN (the F450 parts table).
+aerial/tests/test_airframe.py checks that the two agree.
 
-Derivations from airframe_12in.py (mass=0.8kg, TWR=3.06, arm=0.15m,
-max_thrust=6N/motor):
+Derivations (BaseAviary uses G = 9.8):
+  mass 1.514 kg, max thrust 8.0 N/motor at 8000 RPM
+  kf = 8.0 / 8000^2 = 1.25e-7 N/RPM^2
+  km = 0.017 m * kf = 2.125e-9 N*m/RPM^2
+  thrust2weight = 4 * 8.0 / (1.514 * 9.8) = 2.15674  => MAX_RPM = 8000
 
-  Total max thrust = 4 * 6.0 = 24 N
-  MAX_RPM = sqrt(t2w * m*g / (4*kf))
-  We pick MAX_RPM ≈ 15000 (realistic for 5-6" prop @ ~6S, 2000KV)
-  => kf = 6.0 / 15000^2 = 2.67e-8 N/(RPM^2)
+Rotor drag (BaseAviary: F = -coeff * sum(rotor rad/s) * v_body), sized
+so that at hover (sum = 2283 rad/s) it decelerates the vehicle at
+0.25 1/s horizontally and 0.30 1/s vertically:
+  drag_coeff_xy = 1.514 * 0.25 / 2283 = 1.658e-4
+  drag_coeff_z  = 1.514 * 0.30 / 2283 = 1.990e-4
 
-  km/kf ratio for typical props ≈ 0.016
-  => km = 4.27e-10 N·m/(RPM^2)
+Ground effect: thrust gain = coeff * (R / 4h)^2 with h the prop height.
+coeff 6.4 gives about +10% at h = 2R and +2.5% at h = 4R, roughly what
+full-multirotor measurements show (stronger than the single-rotor
+Cheeseman-Bennett model). cf2x's fitted 11.37 is about twice that.
 
-Motor positions in X-frame (arm 0.15m = sqrt(x^2 + y^2)):
-  x = y = 0.15 / sqrt(2) ≈ 0.1061
-  prop0 front-right: (+0.106, -0.106, 0)
-  prop1 back-right:  (-0.106, -0.106, 0)
-  prop2 back-left:   (-0.106, +0.106, 0)
-  prop3 front-left:  (+0.106, +0.106, 0)
-
-Drag / ground-effect / downwash coefficients are rough scale-ups from
-cf2x. Not measured; only affects flight quality in aggressive maneuvers
-and near-ground hover. Domain randomization should cover the
-uncertainty.
+Prop links carry the prop-disk position (motor x/y, 5.5 cm above the
+arms) so ground effect is measured at the props. Collision: frame and
+arms, the four prop disks, the four 140 mm legs, and the gimbal.
+Standing on its legs, the body origin is 0.155 m above the ground.
+Downwash coefficients are cf2x values; they only matter with several
+drones.
 -->
 
 <robot name="cf12in">
 
-  <properties arm="0.15" kf="2.67e-8" km="4.27e-10" thrust2weight="3.06" max_speed_kmh="80" gnd_eff_coeff="11.36859" prop_radius="0.075" drag_coeff_xy="9.18e-6" drag_coeff_z="1.03e-5" dw_coeff_1="2267.18" dw_coeff_2=".16" dw_coeff_3="-.11" />
+  <properties arm="0.225" kf="1.25e-7" km="2.125e-9" thrust2weight="2.15674" max_speed_kmh="60" gnd_eff_coeff="6.4" prop_radius="0.127" drag_coeff_xy="1.658e-4" drag_coeff_z="1.990e-4" dw_coeff_1="2267.18" dw_coeff_2=".16" dw_coeff_3="-.11" />
 
   <link name="base_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0"/>
-      <mass value="0.8"/>
-      <inertia ixx="0.008" ixy="0.0" ixz="0.0" iyy="0.008" iyz="0.0" izz="0.015"/>
+      <mass value="1.514"/>
+      <inertia ixx="0.01475" ixy="0.0" ixz="0.0" iyy="0.01554" iyz="0.0" izz="0.02125"/>
     </inertial>
 
+    <!-- BaseAviary reads this link positionally: child 1 must be a
+         visual and child 2 a cylinder collision (the center body). -->
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <box size="0.30 0.30 0.05"/>
+        <cylinder radius="0.07" length="0.04"/>
       </geometry>
       <material name="dark_grey">
         <color rgba=".3 .3 .3 1"/>
       </material>
     </visual>
-
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <cylinder radius="0.18" length="0.05"/>
+        <cylinder radius="0.07" length="0.04"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin rpy="0 0 0.7854" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.48 0.04 0.025"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+    <visual>
+      <origin rpy="0 0 -0.7854" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.48 0.04 0.025"/>
+      </geometry>
+      <material name="dark_grey"/>
+    </visual>
+
+    <!-- Arms (two crossed bars). -->
+    <collision>
+      <origin rpy="0 0 0.7854" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.48 0.04 0.025"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 -0.7854" xyz="0 0 0"/>
+      <geometry>
+        <box size="0.48 0.04 0.025"/>
+      </geometry>
+    </collision>
+    <!-- Prop disks. -->
+    <collision>
+      <origin rpy="0 0 0" xyz="0.1591 -0.1591 0.055"/>
+      <geometry>
+        <cylinder radius="0.127" length="0.01"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.1591 -0.1591 0.055"/>
+      <geometry>
+        <cylinder radius="0.127" length="0.01"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.1591 0.1591 0.055"/>
+      <geometry>
+        <cylinder radius="0.127" length="0.01"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.1591 0.1591 0.055"/>
+      <geometry>
+        <cylinder radius="0.127" length="0.01"/>
+      </geometry>
+    </collision>
+    <!-- 140 mm legs under the bottom plate; feet end at z = -0.155. -->
+    <collision>
+      <origin rpy="0 0 0" xyz="0.0849 -0.0849 -0.085"/>
+      <geometry>
+        <box size="0.015 0.015 0.14"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.0849 -0.0849 -0.085"/>
+      <geometry>
+        <box size="0.015 0.015 0.14"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.0849 0.0849 -0.085"/>
+      <geometry>
+        <box size="0.015 0.015 0.14"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.0849 0.0849 -0.085"/>
+      <geometry>
+        <box size="0.015 0.015 0.14"/>
+      </geometry>
+    </collision>
+    <!-- Gimbal, hanging below the battery; clears the feet by 1.5 cm. -->
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 -0.10"/>
+      <geometry>
+        <box size="0.08 0.08 0.08"/>
       </geometry>
     </collision>
   </link>
 
   <link name="prop0_link">
     <inertial>
-      <origin rpy="0 0 0" xyz="0.1061 -0.1061 0"/>
+      <origin rpy="0 0 0" xyz="0.1591 -0.1591 0.055"/>
       <mass value="0"/>
       <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
     </inertial>
@@ -73,7 +160,7 @@ uncertainty.
 
   <link name="prop1_link">
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.1061 -0.1061 0"/>
+      <origin rpy="0 0 0" xyz="-0.1591 -0.1591 0.055"/>
       <mass value="0"/>
       <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
     </inertial>
@@ -85,7 +172,7 @@ uncertainty.
 
   <link name="prop2_link">
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.1061 0.1061 0"/>
+      <origin rpy="0 0 0" xyz="-0.1591 0.1591 0.055"/>
       <mass value="0"/>
       <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
     </inertial>
@@ -97,7 +184,7 @@ uncertainty.
 
   <link name="prop3_link">
     <inertial>
-      <origin rpy="0 0 0" xyz="0.1061 0.1061 0"/>
+      <origin rpy="0 0 0" xyz="0.1591 0.1591 0.055"/>
       <mass value="0"/>
       <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
     </inertial>
