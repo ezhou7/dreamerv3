@@ -41,9 +41,11 @@ judgment calls until the real vehicle and positioning system are known:
 
 Changed 2026-10-17 for the F450 airframe (1.51 kg, was a 0.8 kg
 placeholder): wind and gust forces scaled by the weight ratio (x1.89)
-so they stay the same fraction of weight. With the F450's rotor drag
-(~0.38 N per m/s), the Stage 1c sigmas are about 1.5 m/s of mean wind
-and 0.75 m/s of gust. Mass +-20% covers adding a camera (~+8%).
+so they stay the same fraction of weight. The camera, battery-on-top
+layout (1.63 kg) left the forces unchanged: wind force depends on the
+shape, not the mass. With the F450's rotor drag (~0.41 N per m/s), the
+Stage 1c sigmas are about 1.4 m/s of mean wind and 0.7 m/s of gust.
+The camera is in the nominal mass; mass +-20% covers estimate error.
 """
 from dataclasses import dataclass
 from typing import Tuple

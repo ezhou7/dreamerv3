@@ -47,6 +47,7 @@ class AirframeParams:
     max_rpm: float               # loaded, at full throttle
     motor_time_constant_s: float
     torque_coeff_per_thrust: float  # m, yaw torque = k * thrust
+    rotor_inertia_kg_m2: float   # prop + motor bell, about the shaft
 
     # --- Aerodynamics -------------------------------------------------
     # Rotor drag at hover, as deceleration per unit airspeed (1/s):
@@ -102,8 +103,10 @@ def _arm_rods(mass_each, r0, r1, z, segments=4):
 
 # Origin: frame center in the arm plane. Masses are typical listing values
 # for each part, not weighed (total frame 282 g for the DJI F450 the HJ450
-# copies). Placement assumes Pixhawk + Orange Pi on the top plate, battery
-# under the bottom plate, gimbal below that, no camera in the gimbal.
+# copies). Placement (confirmed 2026-10-17): battery and Orange Pi stacked on
+# top, camera in the gimbal under the bottom plate. Assumed order, bottom
+# to top: Pixhawk on the top plate, battery, Orange Pi. The other orders
+# change roll/pitch inertia by about +-5%, well inside DR.
 F450_PARTS = (
     [Part("top_plate", 0.040, (0, 0, 0.015), (0.12, 0.12, 0.002)),
      Part("bottom_plate_pdb", 0.060, (0, 0, -0.015), (0.14, 0.14, 0.002))]
@@ -117,11 +120,13 @@ F450_PARTS = (
        Part("power_module", 0.020, (0, 0, -0.025)),
        Part("gps_mast", 0.025, (-0.05, 0, 0.08)),
        Part("gps_6m", 0.035, (-0.05, 0, 0.15), (0.05, 0.05, 0.015)),
-       Part("orange_pi_5_bec_cooling", 0.100, (0.03, 0, 0.06),
+       Part("battery_3s_4400", 0.330, (0, 0, 0.065), (0.136, 0.043, 0.03)),
+       Part("orange_pi_5_bec_cooling", 0.100, (0, 0, 0.095),
             (0.10, 0.062, 0.025)),
-       Part("battery_3s_4400", 0.330, (0, 0, -0.035), (0.136, 0.043, 0.03)),
        Part("gimbal_2axis_brushless", 0.200, (0, 0, -0.10),
             (0.08, 0.08, 0.08)),
+       # Model not known yet; GoPro-class (Hero4 88 g, Hero12 154 g).
+       Part("camera", 0.120, (0, 0, -0.10), (0.06, 0.04, 0.045)),
        Part("wiring_straps", 0.040, (0, 0, 0))]
 )
 
@@ -168,6 +173,12 @@ DEFAULT_12IN = AirframeParams(
     motor_time_constant_s=0.05,
     # Cq/Ct * D for a 10x4.5 prop: (Cp / 2pi) * D / Ct ~ 0.016-0.018 m.
     torque_coeff_per_thrust=0.017,
+    # 1045 prop (11 g, tapered blade ~0.7 * m L^2 / 12 = 4.1e-5) plus the
+    # 2212 bell (~20 g ring at 14 mm, 0.4e-5). Speeding a prop up or down
+    # twists the frame the other way by J * dw/dt; for a 0.4 -> 0.6
+    # thrust step at this motor lag that is ~0.1 N m per motor, as large
+    # as the props' drag torque (0.017 m * 4 N).
+    rotor_inertia_kg_m2=4.5e-5,
     # Rotor drag for ~1-2 kg quads is typically 0.2-0.5 1/s horizontally.
     drag_per_s_xy=0.25,
     drag_per_s_z=0.30,

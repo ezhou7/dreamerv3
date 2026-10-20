@@ -273,7 +273,7 @@ Missing pieces in likely order:
    to `LOCAL_POSITION_NED`, `ATTITUDE_QUATERNION`, `HIGHRES_IMU`; pack
    the 22-dim obs; send `SET_ATTITUDE_TARGET` at 50 Hz.
 2. **Safety layer** — clamp body rates to a conservative envelope
-   (3 rad/s), thrust ≤ ~0.7 (the F450 hovers near 0.46), watchdog on
+   (3 rad/s), thrust ≤ ~0.7 (the F450 hovers near 0.50), watchdog on
    step-rate slippage. Never fly raw policy output.
 3. **Real hardware measurements** — check the F450 estimates in
    `aerial/configs/airframe_12in.py` (mass, arm length, thrust curve,

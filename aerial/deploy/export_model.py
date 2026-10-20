@@ -6,6 +6,11 @@ Usage:
         --logdir ~/logdir/dreamer/aerial-<run>-<ts> \\
         --name skydreamer-17m-1c-2026-09-05
 
+By default exports the run's latest checkpoint. `--step 9.4e6` exports
+the checkpoint nearest that training step instead (the best checkpoint
+is often not the last one; see aerial/train/ckpt_sweep.py), and
+`--ckpt <dir name>` a specific one.
+
 Output directory (default: aerial/deploy/models/<name>/):
     agent.pkl     - the network parameters (from the run's ckpt/latest)
     step.pkl      - training-step counter at the checkpoint
@@ -26,7 +31,29 @@ from pathlib import Path
 import ruamel.yaml as yaml
 
 
-def resolve_ckpt(logdir):
+def list_ckpts(logdir):
+    """{checkpoint dir name: training step} for every saved checkpoint."""
+    steps = {}
+    for d in sorted((Path(logdir) / 'ckpt').iterdir()):
+        if d.is_dir() and (d / 'step.pkl').exists():
+            with (d / 'step.pkl').open('rb') as f:
+                steps[d.name] = int(pickle.load(f))
+    return steps
+
+
+def resolve_ckpt(logdir, ckpt=None, step=None):
+    """Checkpoint dir: `ckpt` by name, the one nearest `step`, or latest."""
+    if ckpt:
+        path = logdir / 'ckpt' / ckpt
+        if not path.is_dir():
+            raise SystemExit(f'no checkpoint {ckpt} in {logdir}/ckpt')
+        return path
+    if step is not None:
+        steps = list_ckpts(logdir)
+        if not steps:
+            raise SystemExit(f'no checkpoints in {logdir}/ckpt')
+        name = min(steps, key=lambda n: abs(steps[n] - step))
+        return logdir / 'ckpt' / name
     latest = logdir / 'ckpt' / 'latest'
     if not latest.exists():
         raise SystemExit(f'no ckpt/latest in {logdir}')
@@ -116,35 +143,29 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--logdir', required=True, type=Path,
-                    help='training run directory')
-    ap.add_argument('--name', required=True,
-                    help='short deploy name, e.g. skydreamer-17m-1c-2026-09-05')
-    ap.add_argument('--out-root', type=Path,
-                    default=Path(__file__).parent / 'models')
-    args = ap.parse_args()
-
-    logdir = args.logdir.expanduser()
+def export(logdir, name, out_root, ckpt=None, step=None, verbose=True):
+    """Bundle one checkpoint of `logdir` into out_root/name. Returns the
+    bundle dir."""
+    logdir = Path(logdir).expanduser()
     if not logdir.exists():
         raise SystemExit(f'logdir does not exist: {logdir}')
-    src_ckpt = resolve_ckpt(logdir)
-    print(f'src checkpoint: {src_ckpt}')
+    src_ckpt = resolve_ckpt(logdir, ckpt, step)
+    if verbose:
+        print(f'src checkpoint: {src_ckpt}')
 
-    dst = args.out_root / args.name
+    dst = Path(out_root) / name
     dst.mkdir(parents=True, exist_ok=True)
 
     # agent.pkl, with ref_pol stripped for compatibility.
     stripped, n_stripped = strip_ref_pol(src_ckpt / 'agent.pkl', dst / 'agent.pkl')
-    if stripped:
+    if stripped and verbose:
         print(f'stripped {n_stripped} ref_pol keys from agent.pkl')
 
     # Sidecar files.
-    for name in ('step.pkl', 'done', 'replay.pkl'):
-        src = src_ckpt / name
+    for fname in ('step.pkl', 'done', 'replay.pkl'):
+        src = src_ckpt / fname
         if src.exists():
-            shutil.copy(src, dst / name)
+            shutil.copy(src, dst / fname)
 
     # Config: rewrite for CPU-only headless.
     src_cfg = logdir / 'config.yaml'
@@ -159,7 +180,7 @@ def main():
     # Metadata. Sanitize path fields to avoid leaking the local username
     # via published release tarballs.
     meta = {
-        'name': args.name,
+        'name': name,
         'src_logdir': sanitize_path(str(logdir)),
         'src_ckpt': sanitize_path(str(src_ckpt)),
         'exported_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
@@ -169,10 +190,29 @@ def main():
     with (dst / 'meta.json').open('w') as f:
         json.dump(meta, f, indent=2)
 
-    size_mb = (dst / 'agent.pkl').stat().st_size / (1024 * 1024)
-    print(f'exported to {dst}')
-    print(f'agent.pkl: {size_mb:.1f} MB')
-    print(f'sha256:    {meta["agent_pkl_sha256"][:16]}...')
+    if verbose:
+        size_mb = (dst / 'agent.pkl').stat().st_size / (1024 * 1024)
+        print(f'exported to {dst}')
+        print(f'agent.pkl: {size_mb:.1f} MB')
+        print(f'sha256:    {meta["agent_pkl_sha256"][:16]}...')
+    return dst
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--logdir', required=True, type=Path,
+                    help='training run directory')
+    ap.add_argument('--name', required=True,
+                    help='short deploy name, e.g. skydreamer-17m-1c-2026-09-05')
+    ap.add_argument('--out-root', type=Path,
+                    default=Path(__file__).parent / 'models')
+    which = ap.add_mutually_exclusive_group()
+    which.add_argument('--ckpt', default=None,
+                       help='checkpoint dir name under <logdir>/ckpt')
+    which.add_argument('--step', type=float, default=None,
+                       help='export the checkpoint nearest this step')
+    args = ap.parse_args()
+    export(args.logdir, args.name, args.out_root, args.ckpt, args.step)
 
 
 if __name__ == '__main__':

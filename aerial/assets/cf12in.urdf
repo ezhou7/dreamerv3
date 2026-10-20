@@ -7,16 +7,16 @@ aerial/configs/airframe_12in.py DEFAULT_12IN (the F450 parts table).
 aerial/tests/test_airframe.py checks that the two agree.
 
 Derivations (BaseAviary uses G = 9.8):
-  mass 1.514 kg, max thrust 8.0 N/motor at 8000 RPM
+  mass 1.634 kg (with camera), max thrust 8.0 N/motor at 8000 RPM
   kf = 8.0 / 8000^2 = 1.25e-7 N/RPM^2
   km = 0.017 m * kf = 2.125e-9 N*m/RPM^2
-  thrust2weight = 4 * 8.0 / (1.514 * 9.8) = 2.15674  => MAX_RPM = 8000
+  thrust2weight = 4 * 8.0 / (1.634 * 9.8) = 1.99835  => MAX_RPM = 8000
 
 Rotor drag (BaseAviary: F = -coeff * sum(rotor rad/s) * v_body), sized
-so that at hover (sum = 2283 rad/s) it decelerates the vehicle at
+so that at hover (sum = 2372 rad/s) it decelerates the vehicle at
 0.25 1/s horizontally and 0.30 1/s vertically:
-  drag_coeff_xy = 1.514 * 0.25 / 2283 = 1.658e-4
-  drag_coeff_z  = 1.514 * 0.30 / 2283 = 1.990e-4
+  drag_coeff_xy = 1.634 * 0.25 / 2372 = 1.722e-4
+  drag_coeff_z  = 1.634 * 0.30 / 2372 = 2.067e-4
 
 Ground effect: thrust gain = coeff * (R / 4h)^2 with h the prop height.
 coeff 6.4 gives about +10% at h = 2R and +2.5% at h = 4R, roughly what
@@ -33,13 +33,13 @@ drones.
 
 <robot name="cf12in">
 
-  <properties arm="0.225" kf="1.25e-7" km="2.125e-9" thrust2weight="2.15674" max_speed_kmh="60" gnd_eff_coeff="6.4" prop_radius="0.127" drag_coeff_xy="1.658e-4" drag_coeff_z="1.990e-4" dw_coeff_1="2267.18" dw_coeff_2=".16" dw_coeff_3="-.11" />
+  <properties arm="0.225" kf="1.25e-7" km="2.125e-9" thrust2weight="1.99835" max_speed_kmh="60" gnd_eff_coeff="6.4" prop_radius="0.127" drag_coeff_xy="1.722e-4" drag_coeff_z="2.067e-4" dw_coeff_1="2267.18" dw_coeff_2=".16" dw_coeff_3="-.11" />
 
   <link name="base_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0"/>
-      <mass value="1.514"/>
-      <inertia ixx="0.01475" ixy="0.0" ixz="0.0" iyy="0.01554" iyz="0.0" izz="0.02125"/>
+      <mass value="1.634"/>
+      <inertia ixx="0.01763" ixy="0.0" ixz="0.0" iyy="0.01835" iyz="0.0" izz="0.02120"/>
     </inertial>
 
     <!-- BaseAviary reads this link positionally: child 1 must be a
@@ -137,7 +137,8 @@ drones.
         <box size="0.015 0.015 0.14"/>
       </geometry>
     </collision>
-    <!-- Gimbal, hanging below the battery; clears the feet by 1.5 cm. -->
+    <!-- Gimbal + camera, hanging below the bottom plate; clears the feet
+         by 1.5 cm. -->
     <collision>
       <origin rpy="0 0 0" xyz="0 0 -0.10"/>
       <geometry>

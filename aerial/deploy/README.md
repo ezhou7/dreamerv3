@@ -145,7 +145,7 @@ NumPy (planned follow-up).
   every command.
 - **No safety limits.** For tethered flight, wrap `policy.step()` in a
   clamp (max body rate 3 rad/s, thrust ceiling ~0.7 — the F450 hovers
-  near 0.46, so a lower ceiling leaves no room to climb — watchdog on
+  near 0.50, so a lower ceiling leaves no room to climb — watchdog on
   step-rate slippage). Don't fly with raw policy output.
 
 ## Safety before real flight
