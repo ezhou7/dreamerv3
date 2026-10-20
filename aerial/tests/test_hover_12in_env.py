@@ -53,15 +53,16 @@ def nominal_env(yaw=0.0, z=3.0, **episode_overrides):
                         physicsClientId=sim.CLIENT)
     sim._updateAndStoreKinematicInformation()
     env._motor[:] = HOVER
+    env._rotor_w = H.rotor_rpm(env._motor, sim.MAX_RPM) * (2 * np.pi / 60)
     env._fc.integ = env._hover_trim(HOVER)
     env._history.clear()
     env._history.append(env._snapshot())
     return env
 
 
-def act(roll=0.0, thrust=HOVER):
-    return np.array([roll / MAX_BODY_RATE_RPY, 0.0, 0.0, 2 * thrust - 1],
-                    np.float32)
+def act(roll=0.0, thrust=HOVER, yaw=0.0):
+    return np.array([roll / MAX_BODY_RATE_RPY, 0.0, yaw / MAX_BODY_RATE_RPY,
+                     2 * thrust - 1], np.float32)
 
 
 @pytest.fixture
@@ -152,3 +153,30 @@ def test_rests_on_its_legs(make_env):
     assert sim.pos[0][2] == pytest.approx(DEFAULT_12IN.rest_height_m, abs=0.01)
     assert env._ground_contact()
     assert H.GROUND_CRASH_ALTITUDE_M > DEFAULT_12IN.rest_height_m + 0.05
+
+
+def test_rotor_speedup_twists_frame_like_drag_torque(make_env):
+    """Speeding up motors 1 and 3 pushes the frame the same way their
+    drag torque does in BaseAviary._physics (+z), by J * dw/dt."""
+    env = make_env()
+    w0 = env._rotor_w.copy()
+    frac = np.full(4, HOVER)
+    frac[[1, 3]] *= 1.1
+    tau = env._rotor_yaw_torque(frac)
+    w1 = H.rotor_rpm(frac, env._sim.MAX_RPM) * (2 * np.pi / 60)
+    expected = DEFAULT_12IN.rotor_inertia_kg_m2 * (
+        (w1 - w0)[1] + (w1 - w0)[3]) / H.PHYS_DT
+    assert tau > 0
+    assert tau == pytest.approx(expected, rel=1e-4)
+    assert env._rotor_yaw_torque(frac) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_yaw_rate_loop_tracks(make_env):
+    env = make_env()
+    rates = []
+    for _ in range(25):
+        env.step(act(yaw=1.0))
+        rates.append(env._body_gyro()[2])
+    t63 = next(i for i, r in enumerate(rates) if r >= 0.632)
+    assert (t63 + 1) * 20 <= 300, rates
+    assert max(rates) < 1.3, rates

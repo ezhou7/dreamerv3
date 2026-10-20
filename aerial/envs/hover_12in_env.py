@@ -116,6 +116,16 @@ UNSTABLE_WINDOW = 10         # consecutive unstable steps before crash
 OOB_WINDOW = 5               # consecutive OOB steps before crash
 
 
+def rotor_rpm(thrust_frac, max_rpm):
+    """Rotor speed for a per-motor thrust fraction (thrust ~ rpm^2)."""
+    return np.sqrt(np.maximum(np.asarray(thrust_frac), 0.0)) * max_rpm
+
+
+# Yaw sign of each motor's reaction torque on the frame, in the order of
+# BaseAviary._physics (motors 0 and 2 spin CW, 1 and 3 CCW).
+ROTOR_YAW_SIGN = np.array([-1.0, 1.0, -1.0, 1.0])
+
+
 class _HoverAviary12in(BaseAviary):
     """BaseAviary subclass loading the 12" URDF instead of cf2x.
 
@@ -151,8 +161,7 @@ class _HoverAviary12in(BaseAviary):
         return None
 
     def _preprocessAction(self, action):
-        thrust_frac = np.maximum(np.asarray(action), 0.0).reshape(1, 4)
-        return np.sqrt(thrust_frac) * self.MAX_RPM
+        return rotor_rpm(action, self.MAX_RPM).reshape(1, 4)
 
     def _computeReward(self):
         return 0.0
@@ -274,6 +283,8 @@ class Hover12inEnv(gym.Env):
         self._motor = np.full(
             4, np.clip(hover, ArduPilotRateController.MIN_MOTOR, 1.0),
             dtype=np.float32)
+        self._rotor_w = rotor_rpm(self._motor * ep["motor_scales"],
+                                  self._sim.MAX_RPM) * (2.0 * np.pi / 60.0)
         # ArduPilot keeps rate I-terms across mode changes, so at handover
         # the FC has already trimmed out CG offset and motor imbalance.
         self._fc.integ = self._hover_trim(hover)
@@ -299,7 +310,7 @@ class Hover12inEnv(gym.Env):
             cmd = self._fc.step(body_rates, gyro_meas, thrust_norm)
             self._motor += self._motor_alpha * (cmd - self._motor)
             thrust_frac = self._motor * ep["motor_scales"]
-            self._apply_disturbances(thrust_frac)
+            self._apply_disturbances(thrust_frac, self._rotor_yaw_torque(thrust_frac))
             self._sim.step(thrust_frac.reshape(1, 4))
             self._t += PHYS_DT
             self._history.append(self._snapshot())
@@ -349,8 +360,21 @@ class Hover12inEnv(gym.Env):
         )
         self._sim.DRAG_COEFF = self._nominal_drag * ep["drag_scale"]
 
-    def _apply_disturbances(self, thrust_frac):
-        """Wind + gust at the center of mass, and the CG-offset torque.
+    def _rotor_yaw_torque(self, thrust_frac):
+        """Reaction torque of the rotors changing speed, J * dw/dt.
+
+        gym-pybullet-drones only applies the steady drag torque
+        (km * rpm^2); a motor that speeds its prop up also pushes the
+        frame the other way. Same sign as the drag torque of that motor.
+        """
+        w = rotor_rpm(thrust_frac, self._sim.MAX_RPM) * (2.0 * np.pi / 60.0)
+        dw = (w - self._rotor_w) / PHYS_DT
+        self._rotor_w = w
+        return float(DEFAULT_12IN.rotor_inertia_kg_m2 * ROTOR_YAW_SIGN @ dw)
+
+    def _apply_disturbances(self, thrust_frac, rotor_yaw_torque=0.0):
+        """Wind + gust at the center of mass, the CG-offset torque and
+        the rotor reaction torque.
 
         PyBullet clears external forces after every stepSimulation, so
         this runs before each substep. In WORLD_FRAME, posObj is a world
@@ -374,7 +398,7 @@ class Hover12inEnv(gym.Env):
         rx, ry = ep["cg_offset_m"]
         p.applyExternalTorque(
             drone_id, COM_LINK,
-            torqueObj=[-ry * total_thrust, rx * total_thrust, 0.0],
+            torqueObj=[-ry * total_thrust, rx * total_thrust, rotor_yaw_torque],
             flags=p.LINK_FRAME,
             physicsClientId=self._sim.CLIENT,
         )
