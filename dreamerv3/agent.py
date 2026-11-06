@@ -305,8 +305,10 @@ class Agent(embodied.jax.Agent):
       video = jnp.where(mask, video, border[None, :, None, None, :])
       video = jnp.concatenate([video, 0 * video[:, :10]], 1)
 
-      B, T, H, W, C = video.shape
-      grid = video.transpose((1, 2, 0, 3, 4)).reshape((T, H, B * W, C))
+      # Own names: reassigning T here broke the border of the next image
+      # key (it then had T + 10 frames) when there was more than one.
+      VB, VT, H, W, C = video.shape
+      grid = video.transpose((1, 2, 0, 3, 4)).reshape((VT, H, VB * W, C))
       metrics[f'openloop/{key}'] = grid
 
     carry = (*new_carry, {k: data[k][:, -1] for k in self.act_space})

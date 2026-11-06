@@ -1,9 +1,10 @@
 """NumPy reference implementation of the deploy-time DreamerV3 policy.
 
-Mirrors exactly what `dreamerv3.agent.Agent.policy()` computes for a
-vector-observation agent:
+Mirrors exactly what `dreamerv3.agent.Agent.policy()` computes for an
+agent with a vector observation and, optionally, images (camera models):
 
-        obs --symlog--> Encoder MLP --> tokens
+        vector --symlog--> Encoder MLP --\
+        images --/255-0.5--> Encoder CNN --+--> tokens
         (deter, stoch, prevact, tokens) --RSSM._core + obs layers--> deter', logits
         logits --unimix categorical sample--> stoch'
         (deter', stoch') --policy MLP + bounded_normal head--> mean, std --> action
@@ -103,30 +104,65 @@ class ReferencePolicy:
     def _dense_block(self, lin, norm, act, x):
         return ACTS[act](self._norm(norm, self._linear(lin, x)))
 
+    def _conv(self, name, x):
+        """nets.Conv2D: 'same' padding, stride 1, NHWC/HWIO, as im2col +
+        one matmul."""
+        kernel = self.w[f'{name}/kernel']  # (K, K, Cin, Cout)
+        K, _, C, O = kernel.shape
+        B, H, W, _ = x.shape
+        p = (K - 1) // 2
+        xp = np.pad(x, ((0, 0), (p, K - 1 - p), (p, K - 1 - p), (0, 0)))
+        win = np.lib.stride_tricks.sliding_window_view(xp, (K, K), axis=(1, 2))
+        cols = win.transpose(0, 1, 2, 4, 5, 3).reshape(B * H * W, K * K * C)
+        out = cols @ kernel.reshape(K * K * C, O)
+        return out.reshape(B, H, W, O) + self.w[f'{name}/bias']
+
     # --- graphs ----------------------------------------------------------
 
-    def encode(self, obs_vector):
-        x = symlog(obs_vector) if self.hp['enc_symlog'] else obs_vector
-        for i in range(self.hp['enc_layers']):
-            x = self._dense_block(
-                    f'enc/mlp{i}', f'enc/mlp{i}norm', self.hp['enc_act'], x)
-        return x
+    def encode(self, obs):
+        """obs: the vector (B, O), or a dict of the encoder's inputs: 'vector'
+        (B, O) and images (B, H, W, C) uint8 under their observation keys.
+        Images are stacked along channels in sorted key order, as
+        rssm.Encoder does. Returns tokens (B, T)."""
+        if not isinstance(obs, dict):
+            obs = {'vector': obs}
+        act, outs = self.hp['enc_act'], []
+        if 'enc/mlp0/kernel' in self.w:
+            x = np.asarray(obs['vector'], f32)
+            x = symlog(x) if self.hp['enc_symlog'] else x
+            for i in range(self.hp['enc_layers']):
+                x = self._dense_block(f'enc/mlp{i}', f'enc/mlp{i}norm', act, x)
+            outs.append(x)
+        if self.hp.get('cnn_layers', 0):
+            keys = sorted(k for k in obs if k != 'vector')
+            imgs = [np.asarray(obs[k]) for k in keys]
+            if not keys or any(im.dtype != np.uint8 for im in imgs):
+                raise ValueError(f'expected uint8 images, got {keys}')
+            x = np.concatenate(imgs, -1).astype(f32) / 255 - 0.5
+            for i in range(self.hp['cnn_layers']):
+                x = self._conv(f'enc/cnn{i}', x)
+                B, H, W, C = x.shape
+                x = x.reshape(B, H // 2, 2, W // 2, 2, C).max((2, 4))
+                x = ACTS[act](self._norm(f'enc/cnn{i}norm', x))
+            outs.append(x.reshape(x.shape[0], -1))
+        return np.concatenate(outs, -1)
 
-    def core(self, deter, stoch, prevact, obs_vector, is_first):
+    def core(self, deter, stoch, prevact, obs, is_first):
         """One posterior RSSM step.
 
-        deter (B, D), stoch (B, S, C) one-hot, prevact (B, A), obs (B, O),
-        is_first (B,) bool. Returns deter' (B, D), logits (B, S, C) (raw
-        posterior logits, before unimix).
+        deter (B, D), stoch (B, S, C) one-hot, prevact (B, A), obs: the
+        vector (B, O) or a dict (see encode()), is_first (B,) bool.
+        Returns deter' (B, D), logits (B, S, C) (raw posterior logits,
+        before unimix).
         """
-        deter, stoch, prevact, obs_vector = (
-                np.asarray(x, f32) for x in (deter, stoch, prevact, obs_vector))
+        deter, stoch, prevact = (
+                np.asarray(x, f32) for x in (deter, stoch, prevact))
         keep = ~np.asarray(is_first, bool)
         # RSSM._observe: zero the carry and previous action on episode start.
         deter = deter * keep[:, None]
         stoch = stoch * keep[:, None, None]
         prevact = prevact * keep[:, None]
-        tokens = self.encode(obs_vector)
+        tokens = self.encode(obs)
         deter = self._core(deter, stoch, prevact)
         act = self.hp['rssm_act']
         x = np.concatenate([deter, tokens], -1)
@@ -222,12 +258,18 @@ class NumpyPolicyInference:
                 np.zeros((1, hp['stoch'], hp['classes']), f32),
                 np.zeros((1, self.action_dim), f32))
 
-    def step(self, obs_vector, is_first=False):
+    def step(self, obs, is_first=False):
+        """obs: the vector (O,), or for a camera model a dict with 'vector'
+        (O,) and the images (H, W, C) uint8, without a batch dim."""
         if self._carry is None:
             self.reset()
             is_first = True
         deter, stoch, prevact = self._carry
-        obs = np.asarray(obs_vector, f32).reshape(1, -1)
+        if isinstance(obs, dict):
+            obs = {k: (np.asarray(v, f32).reshape(1, -1) if k == 'vector'
+                       else np.asarray(v)[None]) for k, v in obs.items()}
+        else:
+            obs = np.asarray(obs, f32).reshape(1, -1)
         deter, logits = self.ref.core(
                 deter, stoch, prevact, obs, np.array([bool(is_first)]))
         if self.sampling == 'deterministic':
