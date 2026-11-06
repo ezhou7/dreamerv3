@@ -28,15 +28,26 @@ from aerial.spec.interface import ACTION_DIM, OBS_DIM  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[3]
 
+# Camera tracking policies (Aerial-trackvisionpos/-trackvisionlook envs):
+# a 128x128 RGB image, its depth (nearness) and a 23-dim vector.
+CAMERA_RES = 128
+CAMERA_VECTOR_DIM = 23
 
-def aerial_spaces():
+
+def aerial_spaces(camera=False):
     obs_space = {
-            'vector': elements.Space(np.float32, (OBS_DIM,)),
+            'vector': elements.Space(
+                    np.float32, (CAMERA_VECTOR_DIM if camera else OBS_DIM,)),
             'reward': elements.Space(np.float32),
             'is_first': elements.Space(bool),
             'is_last': elements.Space(bool),
             'is_terminal': elements.Space(bool),
     }
+    if camera:
+        obs_space['image'] = elements.Space(
+                np.uint8, (CAMERA_RES, CAMERA_RES, 3), 0, 255)
+        obs_space['depth'] = elements.Space(
+                np.uint8, (CAMERA_RES, CAMERA_RES, 1), 0, 255)
     act_space = {'action': elements.Space(np.float32, (ACTION_DIM,), -1, 1)}
     return obs_space, act_space
 
@@ -59,9 +70,9 @@ def _cpu(config):
     })
 
 
-def build_agent(config):
+def build_agent(config, camera=False):
     from dreamerv3.agent import Agent
-    obs_space, act_space = aerial_spaces()
+    obs_space, act_space = aerial_spaces(camera)
     return Agent(obs_space, act_space, elements.Config(
             **config.agent,
             logdir=str(config.logdir),
@@ -76,11 +87,11 @@ def build_agent(config):
     ))
 
 
-def load_bundle_agent(model_dir):
+def load_bundle_agent(model_dir, camera=False):
     """Agent with weights from <model_dir>/agent.pkl + config.yaml."""
     model_dir = Path(model_dir)
     cfg = yaml.YAML(typ='safe').load((model_dir / 'config.yaml').read_text())
-    agent = build_agent(_cpu(elements.Config(cfg)))
+    agent = build_agent(_cpu(elements.Config(cfg)), camera)
     with (model_dir / 'agent.pkl').open('rb') as f:
         agent.load(pickle.load(f))
     return agent
@@ -106,9 +117,10 @@ def perturb_params(params, seed=0, scale=0.1):
     return out
 
 
-def make_dummy_bundle(preset, out, seed=0):
+def make_dummy_bundle(preset, out, seed=0, camera=False):
+    """camera=True: a camera policy (image + depth + vector inputs)."""
     config = preset_config(preset).update(logdir=str(out))
-    agent = build_agent(config)
+    agent = build_agent(config, camera)
     data = agent.save()
     data['params'] = perturb_params(data['params'], seed)
     out = Path(out)

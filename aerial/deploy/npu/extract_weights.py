@@ -23,13 +23,16 @@ from pathlib import Path
 import numpy as np
 import ruamel.yaml as yaml
 
-FORMAT_VERSION = 1
+# 2: adds the image encoder (enc/cnn*) and its hyperparameters. Version 1
+# files (vector-only) still load.
+FORMAT_VERSION = 2
+READABLE_VERSIONS = (1, 2)
 
 # Parameters used by the deploy-time forward pass. Everything else in the
 # checkpoint (dec/, rew/, con/, val/, slowval/, dyn/prior*, opt state) is
 # training-only.
 POLICY_PARAM_RE = re.compile(
-    r'^(enc/mlp\d+(norm)?/'
+    r'^(enc/(mlp|cnn)\d+(norm)?/'
     r'|dyn/(dynin\d+|dynhid\d+|dyngru|obs\d+|obslogit)(norm)?/'
     r'|pol/)')
 
@@ -72,6 +75,13 @@ def hparams_from_config(cfg):
         'maxstd': float(pol['maxstd']),
         'norm_eps': 1e-4,  # embodied.jax.nets.Norm default
         'compute_dtype': cfg.get('jax', {}).get('compute_dtype', 'unknown'),
+        # Image encoder (used only if the checkpoint has enc/cnn* weights).
+        'enc_depth': int(enc['depth']),
+        'enc_mults': [int(m) for m in enc['mults']],
+        'enc_kernel': int(enc['kernel']),
+        'enc_strided': bool(enc['strided']),
+        'enc_outer': bool(enc['outer']),
+        'enc_skip': agent.get('enc_skip', ''),
     }
 
 
@@ -79,11 +89,18 @@ def extract_from_params(params, cfg):
     """params: flat {name: array} from agent.pkl. cfg: nested run config.
     Returns (weights dict of float32 arrays, hparams dict)."""
     hp = hparams_from_config(cfg)
-    if any(k.startswith('enc/cnn') for k in params):
-        raise ValueError('image encoders are not supported (vector obs only)')
     weights = {
         k: np.asarray(v, dtype=np.float32)
         for k, v in params.items() if POLICY_PARAM_RE.match(k)}
+    hp['cnn_layers'] = sum(
+        1 for k in weights if re.fullmatch(r'enc/cnn\d+/kernel', k))
+    if hp['cnn_layers']:
+        if hp['enc_strided'] or hp['enc_outer']:
+            raise ValueError('only the max-pooled image encoder '
+                             '(strided=False, outer=False) is supported')
+        hp['cnn_in_channels'] = int(weights['enc/cnn0/kernel'].shape[2])
+    hp['vector_dim'] = (int(weights['enc/mlp0/kernel'].shape[0])
+                        if 'enc/mlp0/kernel' in weights else 0)
     _check_shapes(weights, hp)
     return weights, hp
 
@@ -106,6 +123,14 @@ def _check_shapes(w, hp):
         shape = w['dyn/dynhid0/kernel'].shape
         if shape != (G, D // G + 3 * H, D // G):
             raise ValueError(f'dyn/dynhid0/kernel: unexpected shape {shape}')
+    K, cin = hp['enc_kernel'], hp.get('cnn_in_channels')
+    for i in range(hp['cnn_layers']):
+        depth = hp['enc_depth'] * hp['enc_mults'][i]
+        shape = tuple(w[f'enc/cnn{i}/kernel'].shape)
+        if shape != (K, K, cin, depth):
+            raise ValueError(f'enc/cnn{i}/kernel: shape {shape} != '
+                             f'{(K, K, cin, depth)}')
+        cin = depth
 
 
 def save_npz(path, weights, hp, extra_meta=None):
@@ -120,10 +145,11 @@ def load_npz(path):
     with np.load(path, allow_pickle=False) as data:
         meta = json.loads(str(data[META_KEY]))
         weights = {k: data[k] for k in data.files if k != META_KEY}
-    if meta.get('format_version') != FORMAT_VERSION:
+    if meta.get('format_version') not in READABLE_VERSIONS:
         raise ValueError(
             f'{path}: format_version {meta.get("format_version")} '
-            f'!= {FORMAT_VERSION}')
+            f'not in {READABLE_VERSIONS}')
+    meta.setdefault('cnn_layers', 0)
     return weights, meta
 
 

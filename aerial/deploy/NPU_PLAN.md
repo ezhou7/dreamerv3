@@ -120,7 +120,7 @@ taskset -c 4 ./.venv/bin/python -m aerial.deploy.npu.bench \
 
 | File | Purpose |
 |---|---|
-| `npu/extract_weights.py` | `agent.pkl` + `config.yaml` → `policy_weights.npz` (41 tensors, 5.99M params, 22.9 MB vs 114.7 MB `agent.pkl`). Only `enc/`, `dyn/{dynin,dynhid,dyngru,obs,obslogit}`, `pol/`. Hyperparams stored as JSON `__meta__`; refuses configs it can't reproduce (non-rms norm, image encoder, `absolute`, non-`bounded_normal`). |
+| `npu/extract_weights.py` | `agent.pkl` + `config.yaml` → `policy_weights.npz` (41 tensors, 5.99M params, 22.9 MB vs 114.7 MB `agent.pkl`). Only `enc/`, `dyn/{dynin,dynhid,dyngru,obs,obslogit}`, `pol/`. Hyperparams stored as JSON `__meta__`; refuses configs it can't reproduce (non-rms norm, a strided or `outer` image encoder, `absolute`, non-`bounded_normal`). Since format 2 (2026-11), also the camera policies' image encoder (`enc/cnn*`, max-pooled). |
 | `npu/reference.py` | `ReferencePolicy` — `core()` (deter′, posterior logits) and `actor()` (mean, std) as two pure functions, sampling between them on CPU. `NumpyPolicyInference` — drop-in for `PolicyInference`, numpy only. |
 | `npu/jax_agent.py` | Builds the JAX agent without `make_env`/PyBullet; `JaxPolicy`; dummy-bundle generator (random weights, perturbed so biases/norm scales are non-trivial). |
 | `npu/bench.py` | Phase 0 latency benchmark. |
